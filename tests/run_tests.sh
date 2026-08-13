@@ -55,6 +55,23 @@ for probe in "720" "5" "120"; do
 done
 
 echo ""
+echo "================  C. mo2kbc 编译器一致性 ================"
+for mo in examples/*.mo; do
+    name=$(basename "$mo" .mo)
+    interp=$("$BIN" run "$mo" 2>&1)
+    comp=$("$BIN" mo2kbc "$mo" 2>&1)
+    if [ "$interp" == "$comp" ]; then
+        green "  [PASS] mo2kbc $name (编译输出与解释器一致)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] mo2kbc $name (编译输出与解释器不一致)"
+        echo "  --- 解释器 ---"; echo "$interp" | sed 's/^/    /'
+        echo "  --- 编译器 ---"; echo "$comp" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("mo2kbc:$name")
+    fi
+done
+
+echo ""
 echo "================  汇总 ================"
 echo "  通过: $PASS   失败: $FAIL"
 if [ $FAIL -gt 0 ]; then

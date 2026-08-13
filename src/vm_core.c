@@ -50,6 +50,16 @@ int kprog_add_func(KillsProgram* p, const char* name, uint32_t pc, uint32_t npar
     return p->func_count - 1;
 }
 
+/* 在 data 段末尾追加 size 字节(返回起始地址), 用于数组/字符串运行时存储 */
+uint32_t kprog_alloc_data(KillsProgram* p, uint32_t size) {
+    if (!p || size == 0) return 0;
+    uint32_t start = p->data_size;
+    p->data = (uint8_t*)realloc(p->data, p->data_size + size);
+    memset(p->data + start, 0, size);
+    p->data_size += size;
+    return start;
+}
+
 void kprog_free(KillsProgram* p) {
     if (!p) return;
     free(p->code); p->code = NULL; p->code_count = 0;
@@ -191,6 +201,14 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             { uint64_t addr = (uint64_t)vm->regs[ins->a];
               if (addr >= prog->data_size) { snprintf(vm->error_msg,sizeof(vm->error_msg),"STORE out of bounds %llu at pc %u",(unsigned long long)addr,vm->pc); vm->error_count=1; return 1; }
               prog->data[addr] = (uint8_t)(vm->regs[ins->b] & 0xFF); break; }
+        case OP_LOAD64:
+            { uint64_t addr = (uint64_t)vm->regs[ins->b];
+              if (addr + 8 > prog->data_size) { snprintf(vm->error_msg,sizeof(vm->error_msg),"LOAD64 out of bounds %llu at pc %u",(unsigned long long)addr,vm->pc); vm->error_count=1; return 1; }
+              int64_t v; memcpy(&v, prog->data + addr, 8); vm->regs[ins->a] = v; break; }
+        case OP_STORE64:
+            { uint64_t addr = (uint64_t)vm->regs[ins->a];
+              if (addr + 8 > prog->data_size) { snprintf(vm->error_msg,sizeof(vm->error_msg),"STORE64 out of bounds %llu at pc %u",(unsigned long long)addr,vm->pc); vm->error_count=1; return 1; }
+              int64_t v = vm->regs[ins->b]; memcpy(prog->data + addr, &v, 8); break; }
         case OP_JMP: next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JZ:  if (vm->regs[ins->a] == 0) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JNZ: if (vm->regs[ins->a] != 0) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
@@ -265,6 +283,7 @@ static const char* kvm_opname(uint8_t op) {
     case OP_OR: return "OR"; case OP_XOR: return "XOR"; case OP_NOT: return "NOT";
     case OP_SHL: return "SHL"; case OP_SHR: return "SHR"; case OP_PUSH: return "PUSH";
     case OP_POP: return "POP"; case OP_LOAD: return "LOAD"; case OP_STORE: return "STORE";
+    case OP_LOAD64: return "LOAD64"; case OP_STORE64: return "STORE64";
     case OP_JMP: return "JMP"; case OP_JZ: return "JZ"; case OP_JNZ: return "JNZ";
     case OP_JE: return "JE"; case OP_JNE: return "JNE"; case OP_JG: return "JG";
     case OP_JGE: return "JGE"; case OP_JL: return "JL"; case OP_JLE: return "JLE";

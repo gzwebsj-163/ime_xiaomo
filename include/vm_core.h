@@ -45,8 +45,10 @@ typedef enum {
     OP_PUSH,     /* PUSH src_reg | PUSH imm */
     OP_POP,      /* POP dst_reg */
     /* 内存 */
-    OP_LOAD,     /* LOAD dst_reg, [addr_reg] */
-    OP_STORE,    /* STORE [addr_reg], src_reg */
+    OP_LOAD,     /* LOAD dst_reg, [addr_reg] (字节) */
+    OP_STORE,    /* STORE [addr_reg], src_reg (字节) */
+    OP_LOAD64,   /* LOAD64 dst_reg, [addr_reg] (8 字节, 小端) */
+    OP_STORE64,  /* STORE64 [addr_reg], src_reg (8 字节, 小端) */
     /* 控制流 */
     OP_JMP,      /* JMP offset */
     OP_JZ, OP_JNZ, OP_JE, OP_JNE, OP_JG, OP_JGE, OP_JL, OP_JLE,
@@ -118,6 +120,7 @@ KillsProgram* kprog_new(void);
 void kprog_add_ins(KillsProgram* p, uint8_t op, int32_t a, int32_t b, int64_t imm);
 int  kprog_add_const(KillsProgram* p, uint8_t type, int64_t iv, double fv, const char* sv);
 int  kprog_add_func(KillsProgram* p, const char* name, uint32_t pc, uint32_t nparams);
+uint32_t kprog_alloc_data(KillsProgram* p, uint32_t size);
 void kprog_free(KillsProgram* p);
 
 /* ---- 序列化/反序列化 (方向 4) ---- */
