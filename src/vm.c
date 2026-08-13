@@ -1,0 +1,693 @@
+/*
+ * xiaomo - VM 执行引擎实现
+ *
+ * 架构: 执行 AST, 支持
+ *   1) 调用栈 + 局部作用域 + 真正的函数返回值 (支持递归)
+ *   2) 真正的数组类型 (VAL_ARRAY: 下标访问/长度/打印)
+ *   3) 变量按作用域词法查找 (局部遮蔽全局)
+ *
+ * 作用域模型:
+ *   vm->scopes[0] 为全局作用域; 每次函数调用 push 一个局部作用域,
+ *   返回时 pop。变量查找从最内层作用域向外逐层查找。
+ */
+#include "vm.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdint.h>
+
+/* ---------- 值工具 ---------- */
+static MoValue val_int(long v) { MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_INT; x.ival = v; x.fval = (double)v; return x; }
+static MoValue val_float(double v) { MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_FLOAT; x.fval = v; x.ival = (long)v; return x; }
+static MoValue val_bool(int b) { MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_BOOL; x.ival = b; x.fval = b; return x; }
+static MoValue val_str(const char* s) {
+    MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_STR;
+    x.sval = s ? strdup(s) : NULL;
+    return x;
+}
+static MoValue val_null(void) { MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_NULL; return x; }
+static MoValue val_array_empty(void) { MoValue x; memset(&x,0,sizeof(x)); x.type = VAL_ARRAY; x.arr = (MoArray*)calloc(1,sizeof(MoArray)); return x; }
+
+static void value_free(MoValue* v) {
+    if (!v) return;
+    if (v->type == VAL_ARRAY && v->arr) {
+        for (int i = 0; i < v->arr->count; i++) value_free(&v->arr->items[i]);
+        if (v->arr->items) free(v->arr->items);
+        free(v->arr);
+        v->arr = NULL;
+    } else if (v->sval) {
+        free(v->sval);
+        v->sval = NULL;
+    }
+    v->type = VAL_NULL;
+}
+
+/* 数组追加元素 (返回 0 成功) */
+static int arr_append(MoArray* a, MoValue v) {
+    if (!a) return -1;
+    if (a->count >= a->capacity) {
+        int nc = a->capacity ? a->capacity*2 : 8;
+        MoValue* ni = (MoValue*)realloc(a->items, sizeof(MoValue)*nc);
+        if (!ni) return -1;
+        a->items = ni; a->capacity = nc;
+    }
+    a->items[a->count++] = v;
+    return 0;
+}
+
+static MoValue value_clone(const MoValue* v) {
+    MoValue r; memset(&r,0,sizeof(r));
+    if (!v) return val_null();
+    switch (v->type) {
+    case VAL_INT: r = val_int(v->ival); break;
+    case VAL_FLOAT: r = val_float(v->fval); break;
+    case VAL_BOOL: r = val_bool(v->ival); break;
+    case VAL_STR: r = val_str(v->sval); break;
+    case VAL_ARRAY: {
+        r = val_array_empty();
+        for (int i = 0; i < v->arr->count; i++) {
+            MoValue elem = value_clone(&v->arr->items[i]);
+            arr_append(r.arr, elem);
+        }
+        break;
+    }
+    default: r = val_null(); break;
+    }
+    return r;
+}
+
+void mo_value_to_str(const MoValue* v, char* buf, int buflen) {
+    if (!v || buflen <= 0) { if (buf && buflen>0) buf[0]='\0'; return; }
+    switch (v->type) {
+    case VAL_INT: snprintf(buf, buflen, "%ld", v->ival); break;
+    case VAL_FLOAT: snprintf(buf, buflen, "%g", v->fval); break;
+    case VAL_BOOL: snprintf(buf, buflen, "%s", v->ival ? "true" : "false"); break;
+    case VAL_STR: snprintf(buf, buflen, "%s", v->sval ? v->sval : ""); break;
+    case VAL_ARRAY: {
+        int off = 0;
+        off = snprintf(buf+off, buflen-off, "[");
+        for (int i = 0; i < v->arr->count && off < buflen-1; i++) {
+            char tmp[128];
+            mo_value_to_str(&v->arr->items[i], tmp, sizeof(tmp));
+            if (i > 0) off += snprintf(buf+off, buflen-off, ", ");
+            off += snprintf(buf+off, buflen-off, "%s", tmp);
+        }
+        if (off < buflen-1) snprintf(buf+off, buflen-off, "]");
+        break;
+    }
+    case VAL_BYTES: snprintf(buf, buflen, "[bytes %ld]", v->ival); break;
+    default: snprintf(buf, buflen, "null"); break;
+    }
+}
+
+/* ---------- 变量表 ---------- */
+static void var_table_init(VarTable* vt) { vt->items = NULL; vt->count = 0; vt->capacity = 0; }
+static void var_table_free(VarTable* vt) {
+    for (int i = 0; i < vt->count; i++) {
+        free(vt->items[i].name);
+        value_free(&vt->items[i].value);
+    }
+    if (vt->items) free(vt->items);
+    vt->items = NULL; vt->count = vt->capacity = 0;
+}
+static VarSlot* var_table_get(VarTable* vt, const char* name) {
+    for (int i = 0; i < vt->count; i++) {
+        if (strcmp(vt->items[i].name, name) == 0) return &vt->items[i];
+    }
+    return NULL;
+}
+static void var_table_set(VarTable* vt, const char* name, MoValue v, MoType mt) {
+    VarSlot* s = var_table_get(vt, name);
+    if (s) {
+        value_free(&s->value);
+        s->value = v;
+        s->mtype = mt;
+    } else {
+        if (vt->count >= vt->capacity) {
+            vt->capacity = vt->capacity == 0 ? 16 : vt->capacity * 2;
+            vt->items = (VarSlot*)realloc(vt->items, sizeof(VarSlot) * vt->capacity);
+        }
+        vt->items[vt->count].name = strdup(name);
+        vt->items[vt->count].value = v;
+        vt->items[vt->count].mtype = mt;
+        vt->count++;
+    }
+}
+
+/* ---------- 作用域栈 ---------- */
+static int scope_push(VM* vm) {
+    if (vm->scope_count >= vm->scope_cap) {
+        vm->scope_cap = vm->scope_cap ? vm->scope_cap*2 : 4;
+        vm->scopes = (VarTable*)realloc(vm->scopes, sizeof(VarTable)*vm->scope_cap);
+    }
+    var_table_init(&vm->scopes[vm->scope_count]);
+    return vm->scope_count++;
+}
+static void scope_pop(VM* vm) {
+    if (vm->scope_count <= 1) return; /* 保留全局作用域 */
+    vm->scope_count--;
+    var_table_free(&vm->scopes[vm->scope_count]);
+}
+
+/* 从最内层向外查找变量 (先当前作用域, 再外层) */
+static VarSlot* scope_lookup(VM* vm, const char* name) {
+    for (int i = vm->scope_count - 1; i >= 0; i--) {
+        VarSlot* s = var_table_get(&vm->scopes[i], name);
+        if (s) return s;
+    }
+    return NULL;
+}
+
+/* ---------- VM ---------- */
+static void vm_error(VM* vm, const char* fmt, ...);
+
+void vm_init(VM* vm) {
+    memset(vm, 0, sizeof(VM));
+    vm->scopes = NULL; vm->scope_count = 0; vm->scope_cap = 0;
+    /* 全局作用域 = scopes[0] */
+    scope_push(vm);
+    var_table_init(&vm->functions);
+    vm->output = NULL; vm->output_count = 0; vm->output_cap = 0;
+    vm->fn_defs = NULL; vm->fn_def_count = 0; vm->fn_def_cap = 0;
+}
+
+void vm_free(VM* vm) {
+    /* 弹出所有作用域 (含全局) */
+    for (int i = 0; i < vm->scope_count; i++) var_table_free(&vm->scopes[i]);
+    if (vm->scopes) free(vm->scopes);
+    vm->scopes = NULL; vm->scope_count = vm->scope_cap = 0;
+    var_table_free(&vm->functions);
+    for (int i = 0; i < vm->output_count; i++) free(vm->output[i]);
+    if (vm->output) free(vm->output);
+    vm->output = NULL; vm->output_count = vm->output_cap = 0;
+    if (vm->fn_defs) free(vm->fn_defs);
+    vm->fn_defs = NULL; vm->fn_def_count = vm->fn_def_cap = 0;
+}
+
+static void vm_add_output(VM* vm, const char* s) {
+    if (vm->output_count >= vm->output_cap) {
+        vm->output_cap = vm->output_cap == 0 ? 16 : vm->output_cap * 2;
+        vm->output = (char**)realloc(vm->output, sizeof(char*) * vm->output_cap);
+    }
+    vm->output[vm->output_count++] = strdup(s);
+}
+
+int vm_output_count(const VM* vm) { return vm->output_count; }
+const char* vm_output(VM* vm, int idx) {
+    if (idx < 0 || idx >= vm->output_count) return NULL;
+    return vm->output[idx];
+}
+const MoValue* vm_get_global(const VM* vm, const char* name) {
+    if (vm->scope_count <= 0) return NULL;
+    const VarSlot* s = var_table_get(&vm->scopes[0], name);
+    return s ? &s->value : NULL;
+}
+
+static void vm_error(VM* vm, const char* fmt, ...) {
+    if (vm->error_count == 0) {
+        va_list args;
+        va_start(args, fmt);
+        vsnprintf(vm->error_msg, sizeof(vm->error_msg), fmt, args);
+        va_end(args);
+    }
+    vm->error_count++;
+}
+
+/* ---------- 表达式求值 ---------- */
+static MoValue eval_expr(VM* vm, const AstNode* node);
+static void exec_stmt(VM* vm, const AstNode* node);
+static void exec_block(VM* vm, const AstNode* block);
+
+#define MAX_CALL_DEPTH 256
+
+/* 查找函数定义 (per-VM 函数表) */
+static const AstNode* lookup_function(VM* vm, const char* name) {
+    for (int i = 0; i < vm->fn_def_count; i++) {
+        const AstNode* f = vm->fn_defs[i];
+        if (f && f->text && strcmp(f->text, name) == 0) return f;
+    }
+    return NULL;
+}
+
+/* 调用函数 (支持递归/返回值/局部作用域) */
+static MoValue call_function(VM* vm, const AstNode* fn, const NodeList* args) {
+    if (vm->call_depth >= MAX_CALL_DEPTH) {
+        vm_error(vm, "调用栈溢出 (递归过深 > %d)", MAX_CALL_DEPTH);
+        return val_null();
+    }
+    vm->call_depth++;
+
+    /* 新建局部作用域 */
+    scope_push(vm);
+
+    /* 绑定参数: 形参名 -> 实参值 */
+    for (int i = 0; i < fn->args.count; i++) {
+        const AstNode* param = fn->args.items[i];
+        const char* pname = param->text ? param->text : "";
+        MoValue v = val_null();
+        if (i < args->count) v = eval_expr(vm, args->items[i]);
+        var_table_set(&vm->scopes[vm->scope_count-1], pname, v, param->mtype);
+    }
+
+    /* 保存调用者控制标志, 以备嵌套 return */
+    int saved_ret = vm->return_flag;
+    MoValue saved_retval = vm->return_value; /* 浅拷贝, 调用结束后回收前值 */
+    vm->return_flag = 0;
+    value_free(&vm->return_value);
+    vm->return_value = val_null();
+
+    /* 执行函数体 */
+    exec_block(vm, fn);
+
+    /* 取返回值, 克隆到调用方 */
+    MoValue result = value_clone(&vm->return_value);
+    value_free(&vm->return_value);
+
+    /* 恢复外层 return_flag (如果本函数用 return 提前退出) */
+    vm->return_flag = saved_ret;
+    vm->return_value = saved_retval;
+    /* 若 break/continue 贯穿到函数外则清掉 */
+    vm->break_flag = 0;
+    vm->continue_flag = 0;
+
+    /* 弹出局部作用域 */
+    scope_pop(vm);
+    vm->call_depth--;
+
+    return result;
+}
+
+static int truthy(const MoValue* v) {
+    switch (v->type) {
+    case VAL_INT: return v->ival != 0;
+    case VAL_FLOAT: return v->fval != 0.0;
+    case VAL_BOOL: return v->ival != 0;
+    case VAL_STR: return v->sval != NULL && v->sval[0] != '\0';
+    case VAL_ARRAY: return v->arr != NULL && v->arr->count > 0;
+    case VAL_BYTES: return v->ival != 0;
+    default: return 0;
+    }
+}
+
+static MoValue eval_binop(VM* vm, const AstNode* node) {
+    MoValue l = eval_expr(vm, node->left);
+    MoValue r = eval_expr(vm, node->right);
+    TokenType op = (TokenType)node->inst;
+
+    /* 字符串拼接 */
+    if (op == TOK_PLUS && l.type == VAL_STR && r.type == VAL_STR) {
+        char* buf = (char*)malloc(strlen(l.sval) + strlen(r.sval) + 1);
+        sprintf(buf, "%s%s", l.sval, r.sval);
+        MoValue res = val_str(buf);
+        free(buf);
+        value_free(&l); value_free(&r);
+        return res;
+    }
+    if (op == TOK_PLUS && l.type == VAL_STR) {
+        char rs[64]; mo_value_to_str(&r, rs, sizeof(rs));
+        char* buf = (char*)malloc(strlen(l.sval) + strlen(rs) + 1);
+        sprintf(buf, "%s%s", l.sval, rs);
+        MoValue res = val_str(buf);
+        free(buf);
+        value_free(&l); value_free(&r);
+        return res;
+    }
+
+    double lf = (l.type == VAL_FLOAT) ? l.fval : (double)l.ival;
+    double rf = (r.type == VAL_FLOAT) ? r.fval : (double)r.ival;
+    int isf = (l.type == VAL_FLOAT || r.type == VAL_FLOAT);
+
+    MoValue res;
+    switch (op) {
+    case TOK_PLUS: res = isf ? val_float(lf + rf) : val_int(l.ival + r.ival); break;
+    case TOK_MINUS: res = isf ? val_float(lf - rf) : val_int(l.ival - r.ival); break;
+    case TOK_STAR: res = isf ? val_float(lf * rf) : val_int(l.ival * r.ival); break;
+    case TOK_SLASH:
+        if (rf == 0) { vm_error(vm, "除零错误"); res = val_int(0); }
+        else res = val_float(lf / rf);
+        break;
+    case TOK_PERCENT: res = val_int(l.ival % r.ival); break;
+    case TOK_GT: res = val_bool(isf ? lf > rf : l.ival > r.ival); break;
+    case TOK_LT: res = val_bool(isf ? lf < rf : l.ival < r.ival); break;
+    case TOK_GE: res = val_bool(isf ? lf >= rf : l.ival >= r.ival); break;
+    case TOK_LE: res = val_bool(isf ? lf <= rf : l.ival <= r.ival); break;
+    case TOK_EQ:
+        if (l.type == VAL_STR && r.type == VAL_STR)
+            res = val_bool(strcmp(l.sval, r.sval) == 0);
+        else res = val_bool(l.ival == r.ival);
+        break;
+    case TOK_NEQ:
+        if (l.type == VAL_STR && r.type == VAL_STR)
+            res = val_bool(strcmp(l.sval, r.sval) != 0);
+        else res = val_bool(l.ival != r.ival);
+        break;
+    case TOK_AND_AND: res = val_bool(truthy(&l) && truthy(&r)); break;
+    case TOK_OR_OR: res = val_bool(truthy(&l) || truthy(&r)); break;
+    case TOK_RSHIFT: res = val_int(l.ival >> r.ival); break;
+    case TOK_LSHIFT: res = val_int(l.ival << r.ival); break;
+    case TOK_AMP: res = val_int(l.ival & r.ival); break;
+    case TOK_PIPE: res = val_int(l.ival | r.ival); break;
+    case TOK_CARET: res = val_int(l.ival ^ r.ival); break;
+    case TOK_NOT: res = val_bool(!truthy(&r)); break;
+    default:
+        vm_error(vm, "未知运算符");
+        res = val_null();
+    }
+    value_free(&l); value_free(&r);
+    return res;
+}
+
+/* 解析模板引用 ${name} */
+static MoValue eval_template_ref(VM* vm, const AstNode* node) {
+    if (node->text) {
+        VarSlot* s = scope_lookup(vm, node->text);
+        if (s) return value_clone(&s->value); /* 克隆, 调用方负责 free */
+        vm_error(vm, "模板引用未定义变量: %s", node->text);
+        return val_null();
+    }
+    return val_int(node->ival);
+}
+
+/* 下标访问 base[index] */
+static MoValue eval_index_access(VM* vm, const AstNode* node) {
+    /* node->left = base 表达式, node->right 或 node->ival = 下标 */
+    MoValue base = eval_expr(vm, node->left);
+    long idx;
+    if (node->right) {
+        MoValue iv = eval_expr(vm, node->right);
+        idx = iv.ival;
+        value_free(&iv);
+    } else {
+        idx = node->ival;
+    }
+    MoValue res = val_null();
+    if (base.type == VAL_ARRAY && base.arr) {
+        if (idx < 0 || idx >= base.arr->count) {
+            vm_error(vm, "数组下标越界: %ld (len=%d)", idx, base.arr->count);
+        } else {
+            res = value_clone(&base.arr->items[idx]);
+        }
+    } else if (base.type == VAL_STR && base.sval) {
+        if (idx < 0 || idx >= (long)strlen(base.sval)) {
+            vm_error(vm, "字符串下标越界: %ld", idx);
+        } else {
+            char c[2] = { base.sval[idx], '\0' };
+            res = val_str(c);
+        }
+    } else {
+        vm_error(vm, "对非数组/字符串做下标访问");
+    }
+    value_free(&base);
+    return res;
+}
+
+static MoValue eval_expr(VM* vm, const AstNode* node) {
+    if (!node) return val_null();
+    switch (node->type) {
+    case NODE_LITERAL:
+        if (node->mtype == TYPE_STR) return val_str(node->text ? node->text : "");
+        if (node->mtype == TYPE_FLOAT) return val_float(node->fval);
+        if (node->mtype == TYPE_BOOL) return val_bool(node->ival != 0);
+        return val_int(node->ival);
+    case NODE_EXPR: {
+        VarSlot* s = scope_lookup(vm, node->text);
+        if (s) return value_clone(&s->value);
+        vm_error(vm, "未定义变量: %s", node->text);
+        return val_null();
+    }
+    case NODE_TEMPLATE_REF:
+        return eval_template_ref(vm, node);
+    case NODE_BINOP:
+        return eval_binop(vm, node);
+    case NODE_ARRAY_LIT: {
+        MoValue arr = val_array_empty();
+        for (int i = 0; i < node->args.count; i++) {
+            MoValue e = eval_expr(vm, node->args.items[i]);
+            arr_append(arr.arr, e);
+        }
+        return arr;
+    }
+    case NODE_INDEX_ACCESS:
+        return eval_index_access(vm, node);
+    case NODE_INDEX: {
+        /* (旧) 数组输出拼接 [a, b] -> 字符串 */
+        char buf[1024] = "";
+        for (int i = 0; i < node->args.count; i++) {
+            MoValue v = eval_expr(vm, node->args.items[i]);
+            char tmp[128]; mo_value_to_str(&v, tmp, sizeof(tmp));
+            if (i > 0) strncat(buf, ", ", sizeof(buf) - strlen(buf) - 1);
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            value_free(&v);
+        }
+        return val_str(buf);
+    }
+    case NODE_CALL: {
+        /* 函数调用作为表达式 -> 返回函数返回值 */
+        const AstNode* fn = lookup_function(vm, node->text ? node->text : "");
+        if (!fn) {
+            /* 内置 print */
+            if (node->text && strcmp(node->text, "print") == 0) {
+                char buf[256];
+                for (int i = 0; i < node->args.count; i++) {
+                    MoValue v = eval_expr(vm, node->args.items[i]);
+                    mo_value_to_str(&v, buf, sizeof(buf));
+                    vm_add_output(vm, buf);
+                    value_free(&v);
+                }
+                return val_null();
+            }
+            vm_error(vm, "调用未定义函数: %s", node->text ? node->text : "?");
+            return val_null();
+        }
+        return call_function(vm, fn, &node->args);
+    }
+    default:
+        return val_null();
+    }
+}
+
+/* ---------- 指令执行 (简化内存模拟) ---------- */
+static unsigned char g_mem[65536];
+
+static void exec_instruction(VM* vm, const AstNode* node) {
+    long addr = 0;
+    if (node->text && node->text[0] == '0' && node->text[1] == 'x') {
+        addr = strtol(node->text, NULL, 16);
+    } else if (node->text) {
+        addr = 0;
+        for (const char* c = node->text; *c; c++) addr = (addr * 31 + *c) & 0xFFFF;
+    }
+    long op = node->left ? node->left->ival : 0;
+    TokenType inst = (TokenType)node->inst;
+
+    switch (inst) {
+    case TOK_INST_MOV:
+        if (addr < (long)sizeof(g_mem)) g_mem[addr % sizeof(g_mem)] = (unsigned char)(op & 0xFF);
+        break;
+    case TOK_INST_ADD: g_mem[addr % sizeof(g_mem)] += (unsigned char)(op & 0xFF); break;
+    case TOK_INST_SUB: g_mem[addr % sizeof(g_mem)] -= (unsigned char)(op & 0xFF); break;
+    case TOK_INST_MUL: g_mem[addr % sizeof(g_mem)] *= (unsigned char)(op & 0xFF); break;
+    case TOK_INST_AND: g_mem[addr % sizeof(g_mem)] &= (unsigned char)(op & 0xFF); break;
+    case TOK_INST_OR:  g_mem[addr % sizeof(g_mem)] |= (unsigned char)(op & 0xFF); break;
+    case TOK_INST_XOR: g_mem[addr % sizeof(g_mem)] ^= (unsigned char)(op & 0xFF); break;
+    case TOK_INST_NOP: break;
+    default: break;
+    }
+    (void)vm;
+}
+
+/* ---------- 数据声明 ---------- */
+static void exec_data_decl(VM* vm, const AstNode* node) {
+    char buf[1024] = "";
+    for (int i = 0; i < node->args.count; i++) {
+        AstNode* item = node->args.items[i];
+        if (item->type == NODE_LITERAL && item->mtype == TYPE_STR) {
+            strncat(buf, item->text ? item->text : "", sizeof(buf) - strlen(buf) - 1);
+        } else if (item->type == NODE_LITERAL && item->mtype == TYPE_INT) {
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), "%02X", (unsigned int)(item->ival & 0xFF));
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            if (i < node->args.count - 1) strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+        }
+    }
+    vm_add_output(vm, buf);
+}
+
+/* ---------- 语句执行 ---------- */
+void exec_block(VM* vm, const AstNode* block) {
+    if (!block) return;
+    for (int i = 0; i < block->body.count; i++) {
+        exec_stmt(vm, block->body.items[i]);
+        if (vm->break_flag || vm->continue_flag || vm->return_flag || vm->error_count) return;
+    }
+}
+
+static void exec_fn_decl(VM* vm, const AstNode* node) {
+    /* 函数声明在 vm_run 第一遍已收集到 vm->fn_defs, 这里无需执行 */
+    (void)vm; (void)node;
+}
+
+static void exec_stmt(VM* vm, const AstNode* node) {
+    if (!node || vm->error_count) return;
+    switch (node->type) {
+    case NODE_VAR_DECL: {
+        MoValue v = val_null();
+        if (node->left) v = eval_expr(vm, node->left);
+        if (node->mtype == TYPE_STR && v.type != VAL_STR) {
+            char buf[64]; mo_value_to_str(&v, buf, sizeof(buf));
+            value_free(&v);
+            v = val_str(buf);
+        }
+        /* 声明到当前(最内层)作用域 */
+        var_table_set(&vm->scopes[vm->scope_count-1], node->text, v, node->mtype);
+        break;
+    }
+    case NODE_CONST_DECL:
+        var_table_set(&vm->scopes[vm->scope_count-1], node->text, val_int(node->ival), node->mtype);
+        break;
+    case NODE_ASSIGN: {
+        /* 数组元素赋值 a[i] = v (节点 text 标记为 "[]@") */
+        if (node->text && strcmp(node->text, "[]@") == 0 && node->left &&
+            node->left->type == NODE_INDEX_ACCESS) {
+            const AstNode* ia = node->left;
+            /* 求下标 */
+            long idx;
+            if (ia->right) { MoValue iv = eval_expr(vm, ia->right); idx = iv.ival; value_free(&iv); }
+            else idx = ia->ival;
+            MoValue v = eval_expr(vm, node->right);
+            /* 取被索引的数组 (直接改原变量引用) */
+            MoArray* target_arr = NULL;
+            /* 情况1: 纯变量名 a[i] */
+            if (ia->left && ia->left->type == NODE_EXPR && ia->left->text) {
+                VarSlot* s = scope_lookup(vm, ia->left->text);
+                if (s && s->value.type == VAL_ARRAY && s->value.arr) target_arr = s->value.arr;
+            }
+            /* 情况2: 模板引用 ${a}[i] */
+            if (!target_arr && ia->left && ia->left->type == NODE_TEMPLATE_REF && ia->left->text) {
+                VarSlot* s = scope_lookup(vm, ia->left->text);
+                if (s && s->value.type == VAL_ARRAY && s->value.arr) target_arr = s->value.arr;
+            }
+            if (target_arr) {
+                if (idx < 0 || idx >= target_arr->count) { vm_error(vm, "数组下标越界(赋值): %ld", idx); value_free(&v); }
+                else { value_free(&target_arr->items[idx]); target_arr->items[idx] = v; }
+            } else {
+                vm_error(vm, "对非数组变量做元素赋值");
+                value_free(&v);
+            }
+            break;
+        }
+        MoValue v = eval_expr(vm, node->left);
+        VarSlot* s = scope_lookup(vm, node->text);
+        if (s) {
+            value_free(&s->value);
+            s->value = v;
+        } else {
+            var_table_set(&vm->scopes[vm->scope_count-1], node->text, v, TYPE_UNKNOWN);
+        }
+        break;
+    }
+    case NODE_PRINT: {
+        char buf[1024] = "";
+        for (int i = 0; i < node->args.count; i++) {
+            MoValue v = eval_expr(vm, node->args.items[i]);
+            char tmp[256]; mo_value_to_str(&v, tmp, sizeof(tmp));
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            value_free(&v);
+        }
+        vm_add_output(vm, buf);
+        break;
+    }
+    case NODE_IF: {
+        MoValue c = eval_expr(vm, node->cond);
+        if (truthy(&c)) exec_block(vm, node->then_block);
+        else if (node->else_block) exec_block(vm, node->else_block);
+        break;
+    }
+    case NODE_WHILE: {
+        while (1) {
+            if (vm->error_count) break;
+            MoValue c = eval_expr(vm, node->cond);
+            if (!truthy(&c)) break;
+            exec_block(vm, node->then_block);
+            if (vm->break_flag) { vm->break_flag = 0; break; }
+            if (vm->continue_flag) { vm->continue_flag = 0; continue; }
+            if (vm->return_flag) break;
+        }
+        break;
+    }
+    case NODE_BLOCK:
+        exec_block(vm, node);
+        break;
+    case NODE_RETURN:
+        if (node->left) {
+            MoValue v = eval_expr(vm, node->left);
+            value_free(&vm->return_value);
+            vm->return_value = v;
+        }
+        vm->return_flag = 1;
+        break;
+    case NODE_BREAK:
+        vm->break_flag = 1;
+        break;
+    case NODE_CONTINUE:
+        vm->continue_flag = 1;
+        break;
+    case NODE_INSTRUCTION:
+        exec_instruction(vm, node);
+        break;
+    case NODE_DATA_DECL:
+        exec_data_decl(vm, node);
+        break;
+    case NODE_FN_DECL:
+        exec_fn_decl(vm, node);
+        break;
+    case NODE_CALL: {
+        /* 函数调用作为语句 (丢弃返回值) */
+        const AstNode* fn = lookup_function(vm, node->text ? node->text : "");
+        if (fn) {
+            MoValue r = call_function(vm, fn, &node->args);
+            value_free(&r);
+        } else {
+            MoValue r = eval_expr(vm, node); /* 处理内置 print 等 */
+            value_free(&r);
+        }
+        break;
+    }
+    case NODE_EXPR: {
+        MoValue v = eval_expr(vm, node);
+        value_free(&v);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+int vm_run(VM* vm, const AstNode* program) {
+    if (!program || program->type != NODE_PROGRAM) {
+        vm_error(vm, "无效程序");
+        return 1;
+    }
+    /* 第一遍: 收集函数定义到 per-VM 函数表 */
+    vm->fn_def_count = 0;
+    for (int i = 0; i < program->body.count; i++) {
+        const AstNode* stmt = program->body.items[i];
+        if (stmt->type == NODE_FN_DECL) {
+            if (vm->fn_def_count >= vm->fn_def_cap) {
+                vm->fn_def_cap = vm->fn_def_cap ? vm->fn_def_cap*2 : 16;
+                vm->fn_defs = (const AstNode**)realloc(vm->fn_defs, sizeof(const AstNode*)*vm->fn_def_cap);
+            }
+            vm->fn_defs[vm->fn_def_count++] = stmt;
+        }
+    }
+    /* 第二遍: 执行 (顶层函数声明不执行) */
+    for (int i = 0; i < program->body.count; i++) {
+        const AstNode* stmt = program->body.items[i];
+        if (stmt->type == NODE_FN_DECL) continue;
+        exec_stmt(vm, stmt);
+        if (vm->error_count) return 1;
+    }
+    return 0;
+}

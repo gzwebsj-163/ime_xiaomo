@@ -1,0 +1,42 @@
+# xiaomo - Mo 语言轻量级虚拟机 (纯 C 实现 + C++ 底层积木)
+# 架构: .mo 源码 -> Lexer -> Parser -> AST -> VM 执行
+# VM 复用 linux-xiaomo 的 stack_memory (C++) 作为执行栈
+#
+# 说明: 因复用的 stack_memory.h 是 C++ 头文件(<cstdlib>/<mutex>/<thread>),
+#       所有源文件统一用 g++ 编译 (C 代码兼容 C++, 仅需 malloc 强转等微调)
+
+CC = g++
+CXX = g++
+CFLAGS = -Wall -std=c++17 -g -Iinclude
+CXXFLAGS = $(CFLAGS)
+
+# 源文件
+C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/main.c
+CPP_SRCS =
+
+C_OBJS = $(C_SRCS:.c=.o)
+CPP_OBJS = $(CPP_SRCS:.cpp=.o)
+OBJS = $(C_OBJS) $(CPP_OBJS)
+
+TARGET = xiaomo
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+
+# 所有源统一 g++ 编译
+%.o: %.c
+	$(CXX) $(CXXFLAGS) -x c++ -c $< -o $@
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# 测试
+test: $(TARGET)
+	@bash tests/run_tests.sh
+
+clean:
+	rm -f $(OBJS) $(TARGET)
+
+.PHONY: all clean test

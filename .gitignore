@@ -1,0 +1,10 @@
+# 编译产物
+*.o
+*.obj
+xiaomo
+
+# macOS
+.DS_Store
+
+# 临时
+*.tmp
