@@ -62,13 +62,24 @@ void kprog_free(KillsProgram* p) {
 }
 
 /* ================= 值工具 ================= */
-static void kvm_add_output(KillsVM* vm, const char* s) {
+static void kvm_add_output_ex(KillsVM* vm, const char* s, int append) {
+    if (append && vm->output_count > 0) {
+        /* 追加到最后一行 */
+        char* old = vm->output[vm->output_count - 1];
+        size_t newlen = strlen(old) + strlen(s) + 1;
+        char* buf = (char*)malloc(newlen);
+        snprintf(buf, newlen, "%s%s", old, s);
+        free(old);
+        vm->output[vm->output_count - 1] = buf;
+        return;
+    }
     if (vm->output_count >= vm->output_cap) {
         vm->output_cap = vm->output_cap ? vm->output_cap * 2 : 16;
         vm->output = (char**)realloc(vm->output, sizeof(char*) * vm->output_cap);
     }
     vm->output[vm->output_count++] = strdup(s);
 }
+static void kvm_add_output(KillsVM* vm, const char* s) { kvm_add_output_ex(vm, s, 0); }
 
 /* ================= FFI 表 (内置外部函数) ================= */
 /* FFI idx: 0=print_int, 1=print_str, 2=sqrt, 3=halt_print_reg */
@@ -206,7 +217,30 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
               uint64_t r0; if (vstack_pop_u64(&vm->callstack, &r0) == 0) { /* 丢弃保存的 R0, 保留当前 R0=返回值 */ }
               uint64_t retpc; if (vstack_pop_u64(&vm->callstack, &retpc) == 0) next_pc = (uint32_t)retpc; break; }
         case OP_PRINT:
-            { char buf[64]; snprintf(buf, sizeof(buf), "%lld", (long long)vm->regs[ins->a]); kvm_add_output(vm, buf); break; }
+            { int append = (ins->imm == 1);
+              if (ins->b >= 0) {
+                  /* PRINT -1, const_idx : 打印常量池字符串 */
+                  int ci = ins->b;
+                  if (ci < (int)prog->const_count && prog->consts[ci].type == 1 && prog->consts[ci].sv) {
+                      kvm_add_output_ex(vm, prog->consts[ci].sv, append);
+                  } else {
+                      char buf[64]; snprintf(buf, sizeof(buf), "<bad const %d>", ci); kvm_add_output_ex(vm, buf, append);
+                  }
+              } else {
+                  int64_t v = vm->regs[ins->a];
+                  if (v < 0) {
+                      /* R_TMP < 0 = 常量索引标记 (值 -(ci+1)) */
+                      int ci = (int)(-v - 1);
+                      if (ci < (int)prog->const_count && prog->consts[ci].type == 1 && prog->consts[ci].sv) {
+                          kvm_add_output_ex(vm, prog->consts[ci].sv, append);
+                      } else {
+                          char buf[64]; snprintf(buf, sizeof(buf), "<bad const %d>", ci); kvm_add_output_ex(vm, buf, append);
+                      }
+                  } else {
+                      char buf[64]; snprintf(buf, sizeof(buf), "%lld", (long long)v); kvm_add_output_ex(vm, buf, append);
+                  }
+              }
+              break; }
         case OP_FFI:
             kvm_ffi(vm, ins->a, ins->b >= 0 ? ins->b : 0);
             break;

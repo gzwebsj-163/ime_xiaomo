@@ -19,6 +19,7 @@
 #include "parser.h"
 #include "vm.h"
 #include "vm_core.h"
+#include "mo2kbc.h"
 
 static char* read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -88,6 +89,40 @@ static int cmd_run(const char* path) {
         printf("%s\n", vm_output(&vm, i));
     }
     vm_free(&vm);
+    ast_free(program);
+    free(src);
+    return rc;
+}
+
+/* .mo → Kills 字节码 → kvm_run 执行 (打通两层) */
+static int cmd_mo2kbc(const char* path) {
+    char* src = read_file(path);
+    if (!src) { fprintf(stderr, "无法读取文件: %s\n", path); return 1; }
+    char errbuf[1024] = "";
+    AstNode* program = xiaomo_parse_source(src, errbuf, sizeof(errbuf));
+    if (!program) {
+        fprintf(stderr, "解析失败: %s\n", errbuf);
+        free(src);
+        return 1;
+    }
+    KillsProgram* kp = mo2kbc_compile(program, errbuf, sizeof(errbuf));
+    if (!kp) {
+        fprintf(stderr, "编译失败: %s\n", errbuf);
+        ast_free(program); free(src);
+        return 1;
+    }
+
+    KillsVM vm;
+    kvm_init(&vm);
+    int rc = kvm_run(&vm, kp);
+    if (rc != 0 && vm.error_count > 0) {
+        fprintf(stderr, "Kills 执行错误: %s\n", vm.error_msg);
+    }
+    for (int i = 0; i < kvm_output_count(&vm); i++) {
+        printf("%s\n", kvm_output(&vm, i));
+    }
+    kvm_free(&vm);
+    kprog_free(kp);
     ast_free(program);
     free(src);
     return rc;
@@ -221,6 +256,7 @@ static void print_usage(const char* prog) {
     printf("  %s parse <file.mo>     解析并打印 AST\n", prog);
     printf("  %s tokens <file.mo>    打印 Token 序列\n", prog);
     printf("  %s kvm [-] [file.kbc]  Kills 字节码内核: 内嵌演示(-)或执行二进制\n", prog);
+    printf("  %s mo2kbc <file.mo>    .mo 编译到 Kills 字节码并执行 (打通两层)\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -237,6 +273,8 @@ int main(int argc, char** argv) {
         return cmd_run(argv[2]);
     } else if (strcmp(cmd, "kvm") == 0) {
         return cmd_kvm(argc >= 3 ? argv[2] : "-");
+    } else if (strcmp(cmd, "mo2kbc") == 0 && argc >= 3) {
+        return cmd_mo2kbc(argv[2]);
     } else {
         print_usage(argv[0]);
         return 1;
