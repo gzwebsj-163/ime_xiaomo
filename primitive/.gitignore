@@ -1,0 +1,5 @@
+*.o
+primitive
+stage2
+debug_isr
+test_intr
