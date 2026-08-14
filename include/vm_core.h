@@ -59,7 +59,18 @@ typedef enum {
     OP_FFI,      /* FFI idx */
     /* 系统 */
     OP_PRINT,    /* PRINT dst_reg (打印寄存器到输出) */
-    OP_HALT
+    OP_HALT,
+    /* ---- 硬件直访 (Hardware Direct Access) ---- */
+    OP_HW_PCI_ENUM,  /* 枚举 PCI 设备, 输出到 VM output */
+    OP_HW_USB_ENUM,  /* 枚举 USB 设备 */
+    OP_HW_SERIAL_ENUM, /* 枚举串口设备 */
+    OP_HW_CPU_INFO,  /* CPU 信息 */
+    OP_HW_PCI_RD,    /* PCI 配置空间读: a=dst_reg, b=bus, imm=(dev<<16|func<<8|offset) */
+    OP_HW_UART_OPEN, /* 打开串口: a=baud_reg, b=path_const_idx */
+    OP_HW_UART_CLOSE,/* 关闭串口: a=handle_reg */
+    OP_HW_UART_RD,   /* 读串口: a=dst_reg, b=handle_reg, imm=maxlen */
+    OP_HW_UART_WR,   /* 写串口: a=handle_reg, b=data_reg, imm=len */
+    OP_HW_SYS_INFO   /* 系统信息: 物理内存等 */
 } KillsOp;
 
 /* 指令 (内部表示, 供解释器/编译器用) */

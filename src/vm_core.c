@@ -15,6 +15,7 @@
  * 指令编码: opcode u8 | a i32 | b i32 | imm i64  (内部表示为 KillsIns)
  */
 #include "vm_core.h"
+#include "hw_direct.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -264,6 +265,123 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             break;
         case OP_HALT:
             vm->halted = 1; break;
+        /* ---- 硬件直访指令 ---- */
+        case OP_HW_PCI_ENUM: {
+            char devbuf[65536];
+            int n = hw_pci_enumerate(devbuf, sizeof(devbuf));
+            if (n > 0) {
+                /* 按行分割输出 */
+                char* line = strtok(devbuf, "\n");
+                while (line) {
+                    kvm_add_output(vm, line);
+                    line = strtok(NULL, "\n");
+                }
+            }
+            break;
+        }
+        case OP_HW_USB_ENUM: {
+            char devbuf[65536];
+            int n = hw_usb_enumerate(devbuf, sizeof(devbuf));
+            if (n > 0) {
+                char* line = strtok(devbuf, "\n");
+                while (line) {
+                    kvm_add_output(vm, line);
+                    line = strtok(NULL, "\n");
+                }
+            }
+            break;
+        }
+        case OP_HW_SERIAL_ENUM: {
+            char devbuf[65536];
+            int n = hw_serial_enumerate(devbuf, sizeof(devbuf));
+            if (n > 0) {
+                char* line = strtok(devbuf, "\n");
+                while (line) {
+                    kvm_add_output(vm, line);
+                    line = strtok(NULL, "\n");
+                }
+            }
+            break;
+        }
+        case OP_HW_CPU_INFO: {
+            char infobuf[4096];
+            int n = hw_cpu_info(infobuf, sizeof(infobuf));
+            if (n > 0) {
+                kvm_add_output(vm, infobuf);
+            }
+            break;
+        }
+        case OP_HW_PCI_RD: {
+            /* imm = (dev<<16 | func<<8 | offset) */
+            uint8_t bus = (uint8_t)(ins->b & 0xFF);
+            uint8_t dev = (uint8_t)((ins->imm >> 16) & 0xFF);
+            uint8_t func = (uint8_t)((ins->imm >> 8) & 0xFF);
+            uint32_t offset = (uint32_t)(ins->imm & 0xFF);
+            uint32_t val = 0xFFFFFFFF;
+            int rc = hw_pci_read(bus, dev, func, offset, &val, 4);
+            vm->regs[ins->a] = rc == 0 ? (int64_t)val : -1;
+            break;
+        }
+        case OP_HW_UART_OPEN: {
+            /* b = const_idx (路径字符串), a = baud_reg */
+            int ci = ins->b;
+            int baud = (int)vm->regs[ins->a];
+            if (ci >= 0 && ci < (int)prog->const_count &&
+                prog->consts[ci].type == 1 && prog->consts[ci].sv) {
+                int handle = hw_uart_open(prog->consts[ci].sv, baud > 0 ? baud : 9600);
+                vm->regs[ins->a] = handle;
+            } else {
+                vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_UART_CLOSE: {
+            int handle = (int)vm->regs[ins->a];
+            int rc = hw_uart_close(handle);
+            vm->regs[ins->a] = rc;
+            break;
+        }
+        case OP_HW_UART_RD: {
+            /* a=dst_reg, b=handle_reg, imm=maxlen */
+            int handle = (int)vm->regs[ins->b];
+            int maxlen = (int)ins->imm;
+            if (maxlen <= 0 || maxlen > 4096) maxlen = 256;
+            uint8_t* rbuf = (uint8_t*)malloc(maxlen + 1);
+            int n = hw_uart_read(handle, rbuf, maxlen);
+            if (n > 0) {
+                rbuf[n] = '\0';
+                /* 把读取的数据写入 data 段，返回地址 */
+                uint32_t addr = kprog_alloc_data((KillsProgram*)prog, n + 1);
+                memcpy(prog->data + addr, rbuf, n + 1);
+                vm->regs[ins->a] = (int64_t)addr;
+            } else {
+                vm->regs[ins->a] = n < 0 ? -1 : 0;
+            }
+            free(rbuf);
+            break;
+        }
+        case OP_HW_UART_WR: {
+            /* a=handle_reg, b=data_reg, imm=len
+             * data_reg 指向 data 段中的地址 */
+            int handle = (int)vm->regs[ins->a];
+            uint64_t addr = (uint64_t)vm->regs[ins->b];
+            int len = (int)ins->imm;
+            if (addr + len <= prog->data_size) {
+                int n = hw_uart_write(handle, prog->data + addr, len);
+                vm->regs[ins->a] = n;
+            } else {
+                vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_SYS_INFO: {
+            uint64_t total = 0, free_bytes = 0;
+            hw_phys_mem_info(&total, &free_bytes);
+            /* 返回: R[ins->a] = total, R[ins->b] = free */
+            vm->regs[ins->a] = (int64_t)total;
+            if (ins->b >= 0) vm->regs[ins->b] = (int64_t)free_bytes;
+            break;
+        }
         default:
             snprintf(vm->error_msg, sizeof(vm->error_msg), "unknown opcode %u at pc %u", ins->op, vm->pc);
             vm->error_count = 1; return 1;
@@ -289,6 +407,16 @@ static const char* kvm_opname(uint8_t op) {
     case OP_JGE: return "JGE"; case OP_JL: return "JL"; case OP_JLE: return "JLE";
     case OP_CALL: return "CALL"; case OP_RET: return "RET"; case OP_FFI: return "FFI";
     case OP_PRINT: return "PRINT"; case OP_HALT: return "HALT";
+    case OP_HW_PCI_ENUM: return "HW_PCI_ENUM";
+    case OP_HW_USB_ENUM: return "HW_USB_ENUM";
+    case OP_HW_SERIAL_ENUM: return "HW_SERIAL_ENUM";
+    case OP_HW_CPU_INFO: return "HW_CPU_INFO";
+    case OP_HW_PCI_RD: return "HW_PCI_RD";
+    case OP_HW_UART_OPEN: return "HW_UART_OPEN";
+    case OP_HW_UART_CLOSE: return "HW_UART_CLOSE";
+    case OP_HW_UART_RD: return "HW_UART_RD";
+    case OP_HW_UART_WR: return "HW_UART_WR";
+    case OP_HW_SYS_INFO: return "HW_SYS_INFO";
     default: return "?";
     }
 }

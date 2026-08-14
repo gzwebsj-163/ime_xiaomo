@@ -11,14 +11,26 @@ TARGET2 = stage2
 SRCS2 = mmu.c stage2.c
 OBJS2 = $(SRCS2:.c=.o)
 
-.PHONY: all clean run run2
+# 阶段三: 5 级流水线
+TARGET3 = pipeline_demo
+SRCS3 = pipeline.c pipeline_demo.c
+OBJS3 = $(SRCS3:.c=.o)
+TARGET3T = pipeline_test
 
-all: $(TARGET) $(TARGET2)
+.PHONY: all clean run run2 run3 testpipeline
+
+all: $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET2): $(OBJS2)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET3): $(SRCS3)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET3T): pipeline.c pipeline_test.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 %.o: %.c primitive.h interrupt.h
@@ -36,5 +48,11 @@ run: $(TARGET)
 run2: $(TARGET2)
 	./$(TARGET2)
 
+run3: $(TARGET3)
+	./$(TARGET3)
+
+testpipeline: $(TARGET3T)
+	./$(TARGET3T)
+
 clean:
-	rm -f $(TARGET) $(TARGET2) $(OBJS) $(OBJS2)
+	rm -f $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T) $(OBJS) $(OBJS2)

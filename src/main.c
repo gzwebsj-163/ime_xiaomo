@@ -20,6 +20,7 @@
 #include "vm.h"
 #include "vm_core.h"
 #include "mo2kbc.h"
+#include "hw_demo.h"
 
 static char* read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -257,6 +258,7 @@ static void print_usage(const char* prog) {
     printf("  %s tokens <file.mo>    打印 Token 序列\n", prog);
     printf("  %s kvm [-] [file.kbc]  Kills 字节码内核: 内嵌演示(-)或执行二进制\n", prog);
     printf("  %s mo2kbc <file.mo>    .mo 编译到 Kills 字节码并执行 (打通两层)\n", prog);
+    printf("  %s hwprobe             硬件探测演示 (PCI/USB/串口/CPU/内存/GPU)\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -275,6 +277,8 @@ int main(int argc, char** argv) {
         return cmd_kvm(argc >= 3 ? argv[2] : "-");
     } else if (strcmp(cmd, "mo2kbc") == 0 && argc >= 3) {
         return cmd_mo2kbc(argv[2]);
+    } else if (strcmp(cmd, "hwprobe") == 0) {
+        return hw_demo_run();
     } else {
         print_usage(argv[0]);
         return 1;

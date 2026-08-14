@@ -12,18 +12,20 @@ CXXFLAGS = $(CFLAGS)
 
 # 源文件
 C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/main.c
+HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c
 CPP_SRCS =
 
 C_OBJS = $(C_SRCS:.c=.o)
+HW_OBJS = $(HW_SRCS:.c=.o)
 CPP_OBJS = $(CPP_SRCS:.cpp=.o)
-OBJS = $(C_OBJS) $(CPP_OBJS)
+OBJS = $(C_OBJS) $(HW_OBJS) $(CPP_OBJS)
 
 TARGET = xiaomo
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread -framework IOKit -framework CoreFoundation
 
 # 所有源统一 g++ 编译
 %.o: %.c
