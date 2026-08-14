@@ -11,7 +11,7 @@ CFLAGS = -Wall -std=c++17 -g -Iinclude
 CXXFLAGS = $(CFLAGS)
 
 # 源文件
-C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/main.c
+C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/tensor.c src/weights.c src/main.c
 HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c
 CPP_SRCS =
 

@@ -173,13 +173,21 @@ static AstNode* parse_primary(Parser* p) {
         return e;
     }
     if (t->type == TOK_LBRACKET) {
-        /* 数组字面量 [a, b, ...] -> NODE_ARRAY_LIT */
+        /* 数组字面量 [a, b, ...] -> NODE_ARRAY_LIT (允许跨行/缩进) */
         AstNode* n = ast_new(NODE_ARRAY_LIT, t->line, t->col);
         advance(p);
         while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF)) {
+            while (check(p, TOK_NEWLINE) || check(p, TOK_INDENT) || check(p, TOK_DEDENT)) advance(p);
+            if (check(p, TOK_RBRACKET) || check(p, TOK_EOF)) break;
             node_list_add(&n->args, parse_expr(p));
-            if (!match(p, TOK_COMMA)) break;
+            while (check(p, TOK_NEWLINE) || check(p, TOK_INDENT) || check(p, TOK_DEDENT)) advance(p);
+            if (!match(p, TOK_COMMA)) {
+                while (check(p, TOK_NEWLINE) || check(p, TOK_INDENT) || check(p, TOK_DEDENT)) advance(p);
+                if (check(p, TOK_RBRACKET) || check(p, TOK_EOF)) break;
+                continue;
+            }
         }
+        while (check(p, TOK_NEWLINE) || check(p, TOK_INDENT) || check(p, TOK_DEDENT)) advance(p);
         match(p, TOK_RBRACKET);
         return n;
     }

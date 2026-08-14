@@ -58,6 +58,15 @@ echo ""
 echo "================  C. mo2kbc 编译器一致性 ================"
 for mo in examples/*.mo; do
     name=$(basename "$mo" .mo)
+    # 张量算子示例 (mlp*/train_*) 使用解释器层专属的原生张量内核,
+    # mo2kbc 编译层暂不支持, 故不参与「编译输出与解释器一致」比对
+    # (保持两层回归各自独立)。
+    case "$name" in
+      mlp*|train_*)
+        echo "  [SKIP] mo2kbc $name (张量算子示例, 内核扩展专属)"
+        continue
+        ;;
+    esac
     interp=$("$BIN" run "$mo" 2>&1)
     comp=$("$BIN" mo2kbc "$mo" 2>&1)
     if [ "$interp" == "$comp" ]; then

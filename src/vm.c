@@ -11,6 +11,8 @@
  *   返回时 pop。变量查找从最内层作用域向外逐层查找。
  */
 #include "vm.h"
+#include "tensor.h"
+#include "weights.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -292,9 +294,27 @@ static int truthy(const MoValue* v) {
 }
 
 static MoValue eval_binop(VM* vm, const AstNode* node) {
+    TokenType op = (TokenType)node->inst;
+
+    /* 一元负号: 由 parse_unary 生成 (right 为 NULL, left 存操作数) */
+    if (node->right == NULL) {
+        MoValue l = eval_expr(vm, node->left);
+        if (op == TOK_MINUS) {
+            MoValue res = (l.type == VAL_FLOAT) ? val_float(-l.fval) : val_int(-l.ival);
+            value_free(&l);
+            return res;
+        }
+        if (op == TOK_NOT) {
+            MoValue res = val_bool(!truthy(&l));
+            value_free(&l);
+            return res;
+        }
+        value_free(&l);
+        return val_null();
+    }
+
     MoValue l = eval_expr(vm, node->left);
     MoValue r = eval_expr(vm, node->right);
-    TokenType op = (TokenType)node->inst;
 
     /* 字符串拼接 */
     if (op == TOK_PLUS && l.type == VAL_STR && r.type == VAL_STR) {
@@ -403,6 +423,73 @@ static MoValue eval_index_access(VM* vm, const AstNode* node) {
     return res;
 }
 
+/* 尝试作为原生张量算子调用。识别则返回结果(非 NULL); 否则返回 VAL_NULL。 */
+static MoValue try_tensor_call(VM* vm, const char* name, const NodeList* args) {
+    /* 需要至少 1 个参数的算子 */
+    if (args->count < 1) return val_null();
+    /* 求值所有参数 */
+    int n = args->count;
+    MoValue av[8];
+    memset(av, 0, sizeof(av));
+    for (int i = 0; i < n && i < 8; i++) av[i] = eval_expr(vm, args->items[i]);
+    MoValue r = val_null();
+
+    if (strcmp(name, "matmul") == 0 && n >= 2) {
+        r = xm_matmul(&av[0], &av[1]);
+    } else if (strcmp(name, "bias_add") == 0 && n >= 2) {
+        r = xm_bias_add(&av[0], &av[1]);
+    } else if (strcmp(name, "add") == 0 && n >= 2) {
+        r = xm_bias_add(&av[0], &av[1]);
+    } else if (strcmp(name, "relu") == 0) {
+        r = xm_relu(&av[0]);
+    } else if (strcmp(name, "tanh") == 0) {
+        r = xm_tanh(&av[0]);
+    } else if (strcmp(name, "sigmoid") == 0) {
+        r = xm_sigmoid(&av[0]);
+    } else if (strcmp(name, "softmax") == 0) {
+        r = xm_softmax(&av[0]);
+    } else if (strcmp(name, "hadamard") == 0 && n >= 2) {
+        /* 逐元素乘 (Hadamard). 注意: 不能叫 "mul" —— 那是 VM 保留指令助记符
+           (TOK_INST_MUL), lexer 会把它当关键字, 无法作为函数名调用。 */
+        r = xm_mul(&av[0], &av[1]);
+    } else if (strcmp(name, "diff") == 0 && n >= 2) {
+        /* 逐元素相减 A-B. 注意: 不能叫 "sub" (TOK_INST_SUB 保留) */
+        r = xm_sub(&av[0], &av[1]);
+    } else if ((strcmp(name, "scale") == 0 || strcmp(name, "scale_mul") == 0) && n >= 2) {
+        r = xm_scale(&av[0], av[1].fval);
+    } else if (strcmp(name, "loss_mse") == 0 && n >= 2) {
+        r = xm_loss_mse(&av[0], &av[1]);
+    } else if (strcmp(name, "loss_crossentropy") == 0 && n >= 2) {
+        r = xm_loss_crossentropy(&av[0], &av[1]);
+    } else if (strcmp(name, "grad_tanh") == 0) {
+        r = xm_grad_tanh(&av[0]);
+    } else if (strcmp(name, "grad_mse") == 0 && n >= 2) {
+        r = xm_grad_mse(&av[0], &av[1]);
+    } else if (strcmp(name, "transpose") == 0) {
+        r = xm_transpose(&av[0]);
+    } else if (strcmp(name, "mat_zeros") == 0 && n >= 2) {
+        int rr = (int)av[0].ival, cc = (int)av[1].ival;
+        r = xm_mat_zeros(rr, cc);
+    } else if (strcmp(name, "mat_eye") == 0 && n >= 1) {
+        r = xm_mat_eye((int)av[0].ival);
+    } else if (strcmp(name, "load_weights") == 0 && n >= 2) {
+        /* load_weights(path, key) -> 从 JSON 权重文件加载参数 (矩阵/向量) */
+        const char* path = av[0].type == VAL_STR && av[0].sval ? av[0].sval : "";
+        const char* key  = av[1].type == VAL_STR && av[1].sval ? av[1].sval : "";
+        char errbuf[256] = "";
+        MoValue w; memset(&w, 0, sizeof(w));
+        if (xm_load_weight(path, key, &w, errbuf, sizeof(errbuf)) == 0) {
+            r = w;
+        } else {
+            vm_error(vm, "load_weights 失败: %s", errbuf[0] ? errbuf : "未知错误");
+        }
+    }
+
+    /* 释放临时参数 (算子已克隆/复制所需数据) */
+    for (int i = 0; i < n && i < 8; i++) value_free(&av[i]);
+    return r;
+}
+
 static MoValue eval_expr(VM* vm, const AstNode* node) {
     if (!node) return val_null();
     switch (node->type) {
@@ -457,6 +544,14 @@ static MoValue eval_expr(VM* vm, const AstNode* node) {
                     value_free(&v);
                 }
                 return val_null();
+            }
+            /* 原生张量算子 (模型推理内核) */
+            if (node->text) {
+                MoValue r = try_tensor_call(vm, node->text, &node->args);
+                if (r.type != VAL_NULL || node->args.count == 0) {
+                    /* 算子被识别 (返回非-null 结果); 空参数视为未识别 */
+                    if (r.type != VAL_NULL) return r;
+                }
             }
             vm_error(vm, "调用未定义函数: %s", node->text ? node->text : "?");
             return val_null();
