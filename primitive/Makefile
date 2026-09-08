@@ -17,9 +17,17 @@ SRCS3 = pipeline.c pipeline_demo.c
 OBJS3 = $(SRCS3:.c=.o)
 TARGET3T = pipeline_test
 
-.PHONY: all clean run run2 run3 testpipeline
+# 阶段四: 系统总线 + DMA
+TARGET4 = bus_demo
+SRCS4 = bus.c bus_demo.c
 
-all: $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T)
+# 阶段五: FreeRTOS 风格 RTOS 内核
+TARGET5 = freertos_demo
+SRCS5 = freertos.c freertos_demo.c ctx_android.c
+
+.PHONY: all clean run run2 run3 testpipeline run4 run5
+
+all: $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T) $(TARGET4) $(TARGET5)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -31,6 +39,12 @@ $(TARGET3): $(SRCS3)
 	$(CC) $(CFLAGS) -o $@ $^
 
 $(TARGET3T): pipeline.c pipeline_test.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET4): $(SRCS4)
+	$(CC) $(CFLAGS) -o $@ $^
+
+$(TARGET5): $(SRCS5)
 	$(CC) $(CFLAGS) -o $@ $^
 
 %.o: %.c primitive.h interrupt.h
@@ -54,5 +68,11 @@ run3: $(TARGET3)
 testpipeline: $(TARGET3T)
 	./$(TARGET3T)
 
+run4: $(TARGET4)
+	./$(TARGET4)
+
+run5: $(TARGET5)
+	./$(TARGET5)
+
 clean:
-	rm -f $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T) $(OBJS) $(OBJS2)
+	rm -f $(TARGET) $(TARGET2) $(TARGET3) $(TARGET3T) $(TARGET4) $(TARGET5) $(OBJS) $(OBJS2)

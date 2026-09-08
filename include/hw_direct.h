@@ -12,7 +12,10 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <termios.h>  /* UART */
-#include <mach/mach.h> /* macOS 内存统计 */
+/* macOS 专属内存统计接口 - 其他平台(Android Termux/Linux)跳过 */
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +62,36 @@ int hw_uart_write(int handle, const uint8_t* buf, int len);
 
 /* ========== 系统信息 ========== */
 int hw_phys_mem_info(uint64_t* total, uint64_t* free_bytes);
+
+/* ========== SPI (Linux spidev) ========== */
+int hw_spi_open(const char* dev_path, int mode, int bits, int speed);
+int hw_spi_close(int handle);
+int hw_spi_transfer(int handle, const uint8_t* tx, uint8_t* rx, int len);
+
+/* ========== I2C (Linux /dev/i2c-N ioctl, 2026-09-07) ========== */
+int hw_i2c_open(const char* dev_path, uint16_t addr);   /* -> handle(>=0) / -1 */
+int hw_i2c_close(int handle);
+int hw_i2c_write(int handle, const uint8_t* buf, int len);
+int hw_i2c_read(int handle, uint8_t* buf, int maxlen);
+int hw_i2c_xfer(int handle, const uint8_t* tx, int txlen,
+                uint8_t* rx, int rxmaxlen);              /* 写-读组合 (I2C_RDWR) */
+int hw_i2c_enumerate(char* buf, int buflen);             /* 枚举 /dev/i2c-* */
+
+/* ========== PWM (Linux /sys/class/pwm sysfs, 2026-09-07) ========== */
+int hw_pwm_export(int chip, int channel);                /* pwmchip{chip}/export -> handle(>=0) */
+int hw_pwm_unexport(int chip, int channel);
+int hw_pwm_set_period(int chip, int channel, int period_ns);
+int hw_pwm_set_duty(int chip, int channel, int duty_ns);
+int hw_pwm_set_enable(int chip, int channel, int on);
+int hw_pwm_read(int chip, int channel, const char* attr,
+                char* buf, int buflen);                  /* 读 period/duty_cycle/enable */
+int hw_pwm_enumerate(char* buf, int buflen);             /* 枚举 /sys/class/pwm/pwmchip* */
+
+/* ========== GPIO (sysfs) ========== */
+int hw_gpio_export(int pin);
+int hw_gpio_set_direction(int pin, int output);
+int hw_gpio_write(int pin, int val);
+int hw_gpio_read(int pin);
 
 #ifdef __cplusplus
 }

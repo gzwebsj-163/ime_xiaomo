@@ -14,8 +14,11 @@ extern "C" {
 
 /* VM 值类型 */
 typedef enum {
-    VAL_INT, VAL_FLOAT, VAL_STR, VAL_BOOL, VAL_BYTES, VAL_ARRAY, VAL_NULL
+    VAL_INT, VAL_FLOAT, VAL_STR, VAL_BOOL, VAL_BYTES, VAL_ARRAY, VAL_TENSOR, VAL_NULL
 } ValueType;
+
+/* 前向声明 */
+typedef struct NdTensor NdTensor;
 
 /* 数组值: 元素为 MoValue (同构或异构) */
 typedef struct {
@@ -30,6 +33,7 @@ struct MoValueInner {
     double fval;
     char* sval;   /* 字符串 */
     MoArray* arr; /* 数组 (VAL_ARRAY 时用) */
+    void* tensor; /* NdTensor* (VAL_TENSOR 时用) */
 };
 typedef struct MoValueInner MoValue;
 

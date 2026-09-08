@@ -30,7 +30,18 @@ extern "C" {
 
 #define KILLS_MAGIC      "KILLS"
 #define KILLS_VERSION    1
-#define KILLS_NREG       64
+#define KILLS_NREG       128
+/* CALL/RET 现场快照边界: R0..KILLS_SNAP_NREG-1 进快照(参数槽/局部/临时),
+ * 其后为全局变量区(编译器 R_GLOBAL_BASE 起) —— 不快照 → 函数内写全局
+ * 在 RET 后保留(穿透), 而局部寄存器仍被恢复 → 递归安全。 */
+#define KILLS_SNAP_NREG  72
+
+/* ---- OEM 设备签名寄存器 ----
+ * R127 = 寄存器堆顶端 (KILLS_NREG-1), 上电由 hw_oem 熔丝烧录设备标志。
+ * 四重固化: ①熔丝 write-once ②kvm_run 每指令步末写屏蔽(越权写回滚+计数)
+ * ③编译器 R_GLOBAL_MAX 封顶 126 (全局变量永不分配 R127) ④字节码只有读
+ * 指令 OP_HW_SIG_RD, 无写指令存在。 → 签名永不变化。 */
+#define KVM_REG_SIG      (KILLS_NREG - 1)
 
 /* 指令操作码 */
 typedef enum {
@@ -70,7 +81,34 @@ typedef enum {
     OP_HW_UART_CLOSE,/* 关闭串口: a=handle_reg */
     OP_HW_UART_RD,   /* 读串口: a=dst_reg, b=handle_reg, imm=maxlen */
     OP_HW_UART_WR,   /* 写串口: a=handle_reg, b=data_reg, imm=len */
-    OP_HW_SYS_INFO   /* 系统信息: 物理内存等 */
+    OP_HW_SYS_INFO,  /* 系统信息: 物理内存等 */
+    /* ---- SPI / GPIO (TFT 屏驱动) ---- */
+    OP_HW_SPI_XFER,  /* SPI 传输: a=handle_reg, b=data_addr_reg, imm=len */
+    OP_HW_SPI_OPEN,  /* 打开 SPI 设备: a=dst_handle_reg, b=path_const_idx */
+    OP_HW_SPI_CLOSE, /* 关闭 SPI: a=handle_reg */
+    OP_HW_GPIO_SET,  /* GPIO 写: a=pin_reg, b=val_reg */
+    OP_HW_GPIO_EXPORT, /* GPIO 导出: a=pin_reg */
+    /* ---- 嵌入式 Linux 内核核心 (阶段六) ---- */
+    OP_LINUX_INIT,   /* 启动 Linux VM: a=dst_handle_reg, b=cfg_path_const_idx */
+    OP_LINUX_EXEC,   /* 注入命令+等预期输出: a=handle_reg, b=cmd_const_idx, imm=expect_const_idx(<0 不等待) */
+    OP_LINUX_READ,   /* 读 guest 全部输出: a=handle_reg(become addr_reg), b=count_reg */
+    OP_LINUX_END,    /* 销毁 Linux VM: a=handle_reg */
+
+    /* ---- 浮点扩展 (2026-09-07: 对齐解释器 double 语义) ----
+     * 约定: 浮点值以 double 的 64 位位模式存入寄存器(编译期 fvar/last_ty 追踪类型)。
+     * FDIV 对齐解释器 "int/int → float" 语义: mo2kbc 编 / 时先 I2F 双方再 FDIV。 */
+    OP_FADD,         /* FADD a, b: *(double*)&regs[a] = fa + fb */
+    OP_FSUB,         /* FSUB a, b */
+    OP_FMUL,         /* FMUL a, b */
+    OP_FDIV,         /* FDIV a, b (除零 → ff=inf, 不报错) */
+    OP_F2I,          /* F2I a: regs[a] = (int64_t)*(double*)&regs[a] (截断, 对齐 val_float 的 ival) */
+    OP_I2F,          /* I2F a: *(double*)&regs[a] = (double)regs[a] */
+
+    /* ---- OEM 设备签名 (hw_oem 熔丝层) — 追加在枚举末尾保持旧 opcode 编号不变 ---- */
+    OP_HW_SIG_RD,    /* HW_SIG_RD dst_reg: 读签名寄存器 R127 (设备标志, 只读) */
+
+    /* ---- 硬件设备命令分发 (hw_dev, 2026-09-07) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_DEV_CALL,  /* HW_DEV_CALL dst_reg, cmd_const_idx: dst = hw_dev_dispatch(cmd串) */
 } KillsOp;
 
 /* 指令 (内部表示, 供解释器/编译器用) */
@@ -109,7 +147,7 @@ typedef struct {
 } KillsProgram;
 
 /* VM 实例 */
-typedef struct {
+typedef struct KillsVM {
     int64_t regs[KILLS_NREG];
     VmStack operand;      /* 操作数栈 */
     VmStack callstack;    /* 调用栈 */
@@ -124,6 +162,10 @@ typedef struct {
     char error_msg[1024];
     uint32_t step_limit;  /* 防死循环 */
     uint32_t steps;
+    /* ---- OEM 设备签名 (hw_oem 熔丝层, kvm_run 上电烧录) ---- */
+    uint64_t sig_fuse;       /* 熔丝值 (= HW_OEM_SIG_HEX) */
+    uint8_t  sig_burned;     /* 上电烧录标记 */
+    uint32_t sig_violations; /* 运行期越权写 R127 计数 (写屏蔽审计) */
 } KillsVM;
 
 /* ---- 程序构建 ---- */
@@ -146,6 +188,15 @@ void kvm_free(KillsVM* vm);
 int  kvm_run(KillsVM* vm, const KillsProgram* prog);
 const char* kvm_output(KillsVM* vm, int idx);
 int  kvm_output_count(const KillsVM* vm);
+
+/* ---- 交互输入桥 (openclaw 交互系统) ----
+ * VM 通过 FFI 3/4 (input_pending/input_read) 读取用户消息。
+ * 外部(宿主 main / ESP32 I/O 任务)调用 kvm_io_push 注入一行输入。 */
+void kvm_io_push(const char* line);
+void kvm_io_pushf(const char* fmt, ...);
+void kvm_io_set_pending(int v);
+int  kvm_io_pending(void);
+const char* kvm_io_line(void);
 
 /* ---- 反汇编 (调试) ---- */
 void kvm_disassemble(const KillsProgram* p, char* buf, int buflen);

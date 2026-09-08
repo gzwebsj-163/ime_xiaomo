@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "lexer.h"
 #include "parser.h"
@@ -21,6 +22,9 @@
 #include "vm_core.h"
 #include "mo2kbc.h"
 #include "hw_demo.h"
+#include "hw_oem.h"
+#include "hw_hex.h"
+#include "hw_dev.h"
 
 static char* read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -95,8 +99,8 @@ static int cmd_run(const char* path) {
     return rc;
 }
 
-/* .mo → Kills 字节码 → kvm_run 执行 (打通两层) */
-static int cmd_mo2kbc(const char* path) {
+/* .mo → Kills 字节码 → kvm_run 执行 (打通两层); 可选 -o out.kbc 序列化落盘 */
+static int cmd_mo2kbc(const char* path, const char* outpath) {
     char* src = read_file(path);
     if (!src) { fprintf(stderr, "无法读取文件: %s\n", path); return 1; }
     char errbuf[1024] = "";
@@ -111,6 +115,34 @@ static int cmd_mo2kbc(const char* path) {
         fprintf(stderr, "编译失败: %s\n", errbuf);
         ast_free(program); free(src);
         return 1;
+    }
+    /* MO2KBC_DUMP=1: 反汇编打印编译产物 (排障用) */
+    if (getenv("MO2KBC_DUMP")) {
+        static char dbuf[1 << 20];
+        kvm_disassemble(kp, dbuf, (int)sizeof(dbuf));
+        fputs(dbuf, stderr);
+    }
+    if (outpath) {
+        uint8_t* blob = NULL;
+        long blen = kprog_serialize(kp, &blob);
+        if (blen > 0 && blob) {
+            FILE* f = fopen(outpath, "wb");
+            if (f) {
+                fwrite(blob, 1, (size_t)blen, f);
+                fclose(f);
+                fprintf(stderr, "[mo2kbc] 已序列化字节码: %s (%ld bytes)\n", outpath, blen);
+            } else {
+                fprintf(stderr, "[mo2kbc] 无法写入: %s\n", outpath);
+            }
+            free(blob);
+        } else {
+            fprintf(stderr, "[mo2kbc] 序列化失败\n");
+        }
+        /* 纯编译模式: 落盘后直接返回, 不执行 (交互 .mo 是无限循环) */
+        kprog_free(kp);
+        ast_free(program);
+        free(src);
+        return 0;
     }
 
     KillsVM vm;
@@ -131,6 +163,65 @@ static int cmd_mo2kbc(const char* path) {
 
 static void kvm_test_callret(void);
 static void kvm_test_recursion(void);
+/* openclaw 交互系统宿主验证: ./xiaomo interact <file.mo>
+ * VM 在独立线程跑 kvm_run(无限事件循环, 靠 input_wait 阻塞等输入);
+ * 主线程读 stdin 每行 → kvm_io_push 注入 VM; 每注入一行后刷出 VM 的新输出。
+ * 验证通过后, 同一 .mo + FFI 逻辑下沉到 ESP32(TCP 通道)。 */
+#include <pthread.h>
+static void* interact_vm_thread(void* arg) {
+    KillsVM* vm = (KillsVM*)arg;
+    int rc = kvm_run(vm, vm->prog);
+    (void)rc;
+    return NULL;
+}
+static int cmd_interact(const char* path) {
+    char* src = read_file(path);
+    if (!src) { fprintf(stderr, "无法读取文件: %s\n", path); return 1; }
+    char errbuf[1024] = "";
+    AstNode* program = xiaomo_parse_source(src, errbuf, sizeof(errbuf));
+    if (!program) { fprintf(stderr, "解析失败: %s\n", errbuf); free(src); return 1; }
+    KillsProgram* kp = mo2kbc_compile(program, errbuf, sizeof(errbuf));
+    if (!kp) { fprintf(stderr, "编译失败: %s\n", errbuf); ast_free(program); free(src); return 1; }
+
+    KillsVM vm;
+    kvm_init(&vm);
+    vm.prog = kp;
+    pthread_t tid;
+    pthread_create(&tid, NULL, interact_vm_thread, &vm);
+
+    printf("[interact] VM loop started. Type a message and press Enter (Ctrl-D to quit):\n");
+    fflush(stdout);
+    /* 输出统一由 VM 线程在 input_wait 阻塞边界 flush 打印:
+       LLM 回复是 append 到已有行(output_count 不变), 主线程按 count 增量轮询
+       永远看不到 → 这里只负责注入输入, 不再轮询打印。 */
+    char line[2048];
+    while (fgets(line, sizeof(line), stdin)) {
+        /* 去掉换行 */
+        size_t ln = strlen(line);
+        while (ln > 0 && (line[ln-1] == '\n' || line[ln-1] == '\r')) { line[--ln] = 0; }
+        if (ln == 0) continue;
+        kvm_io_push(line);
+    }
+    /* stdin EOF: 等 VM 真正回到 input_wait 空闲再 cancel。
+       ⚠️ pending==0 不等于线程空闲: VM 消费输入后可能正在 llm_query 阻塞(3~8s);
+       判定条件 = pending 已空 且 output 已 flush 清空(count==0) 连续 3 次(1.5s),
+       此时线程确实停在 input_wait 等下一轮输入 → 安全取消。上限 100s。 */
+    fprintf(stderr, "[interact] EOF, waiting for VM to finish...\n");
+    int idle_rounds = 0;
+    for (int w = 0; w < 200; w++) {
+        usleep(500000);
+        if (!kvm_io_pending() && kvm_output_count(&vm) == 0) { idle_rounds++; if (idle_rounds >= 3) break; }
+        else idle_rounds = 0;
+    }
+    pthread_cancel(tid);
+    pthread_join(tid, NULL);
+    kvm_free(&vm);
+    kprog_free(kp);
+    ast_free(program);
+    free(src);
+    return 0;
+}
+
 static int cmd_kvm_demo(void) {
     /* 内嵌演示: 计算 6! 用字节码 (MOV/算术/JNZ 循环/PRINT/HALT) */
     KillsProgram* p = kprog_new();
@@ -250,6 +341,71 @@ static int cmd_kvm(const char* path) {
     return rc;
 }
 
+/* ================= hw_dev CLI (2026-09-07) ================= */
+
+/* 动态注册演示用 LED 桩: 返回 0x2A 便于与静态命令(0x00)区分 */
+static uint16_t dev_led_stub(void *arg) {
+    (void)arg;
+    return 0x2AU;
+}
+
+/* hw_dev 能力卡: init → ctrl 回调两态 → 静态表分发 → 动态注册/撞名/分发 → hook 释放 */
+static int hwdev_show(void) {
+    printf("=== xiaomo hw_dev 设备命令分发层 ===\n\n");
+
+    /* 1) ctrl 两态 */
+    printf("ctrl(NULL)          = 0x%02X  (无回调默认 0x01)\n", hw_dev_ctrl(HW_DEV_OPTIONS, NULL, NULL));
+    printf("ctrl(DBG, echo桩)   = 0x%02X  (回调透传)\n", hw_dev_ctrl(HW_DEV_DEBUG, dev_led_stub, NULL));
+
+    /* 2) 静态命令表分发 (前缀匹配, "\n\r " 尾缀) + 结果通道 (hw_dev_result) */
+    char rbuf[256];
+    uint16_t r = hw_dev_dispatch("echo\n\r hello", NULL);
+    hw_dev_result(rbuf, sizeof(rbuf));
+    printf("dispatch echo       = 0x%02X  result=[%s]\n", r, rbuf);
+    r = hw_dev_dispatch("pwm\n\r 50", NULL);
+    printf("dispatch pwm        = 0x%02X\n", r);
+    r = hw_dev_dispatch("bogus\n\r ", NULL);
+    printf("dispatch bogus      = 0x%02X  (未命中)\n", r);
+
+    /* 2b) i2c/pwm 真实外设演示 (Linux 实收发; macOS 无节点→0x03 IO错) */
+    r = hw_dev_dispatch("i2c\n\r list", NULL);
+    hw_dev_result(rbuf, sizeof(rbuf));
+    printf("dispatch i2c list   = 0x%02X  result=[%s]\n", r, rbuf);
+    r = hw_dev_dispatch("pwm\n\r list", NULL);
+    hw_dev_result(rbuf, sizeof(rbuf));
+    printf("dispatch pwm list   = 0x%02X  result=[%s]\n", r, rbuf);
+
+    /* 3) 动态注册 → 分发 → 撞名拒绝 → 二次注册拒绝 */
+    int rc = hw_dev_register("led\n\r ", 0xABCD00U, dev_led_stub);
+    printf("register led        = %d   (0=成功)\n", rc);
+    rc = hw_dev_register("led\n\r ", 0x1U, dev_led_stub);
+    printf("register led again  = %d   (-2=撞名拒绝)\n", rc);
+    rc = hw_dev_register("echo\n\r ", 0x2U, dev_led_stub);
+    printf("register dup echo   = %d   (-2=静态表撞名拦截)\n", rc);
+    r = hw_dev_dispatch("led\n\r on", NULL);
+    printf("dispatch led        = 0x%02X  (动态命令透传)\n", r);
+    printf("动态表条数           = %u\n", (unsigned)hw_dev_registered());
+
+    /* 4) hook 释放后动态命令失效 */
+    hw_dev_hook(NULL);
+    r = hw_dev_dispatch("led\n\r on", NULL);
+    printf("hook 后 dispatch led= 0x%02X  (0xFF=动态表已清)\n", r);
+    printf("VM 内核联动: kvm_run 上电自动 hw_dev_init; .mo 端 hw_dev(\"...\") 见 examples/hwdev_test.mo\n");
+    return 0;
+}
+
+/* 一次性分发 CLI: ./xiaomo hwdev "echo\n\r hello" */
+static int cmd_hwdev(const char* cmd) {
+    if (cmd == NULL) return hwdev_show();
+    uint16_t r = hw_dev_dispatch(cmd, NULL);
+    char rbuf[256];
+    hw_dev_result(rbuf, sizeof(rbuf));
+    printf("hwdev dispatch = 0x%02X%s\n", r,
+           (r == 0xFFU) ? " (未命中: 命令须含 \"\\n\\r \" 尾缀, 如 'echo\\n\\r hello')" : "");
+    if (rbuf[0] != '\0') printf("hwdev result   = [%s]\n", rbuf);
+    return (r == 0xFFU) ? 1 : 0;
+}
+
 static void print_usage(const char* prog) {
     printf("xiaomo - Mo 语言轻量级虚拟机 (纯 C)\n");
     printf("用法:\n");
@@ -259,6 +415,9 @@ static void print_usage(const char* prog) {
     printf("  %s kvm [-] [file.kbc]  Kills 字节码内核: 内嵌演示(-)或执行二进制\n", prog);
     printf("  %s mo2kbc <file.mo>    .mo 编译到 Kills 字节码并执行 (打通两层)\n", prog);
     printf("  %s hwprobe             硬件探测演示 (PCI/USB/串口/CPU/内存/GPU)\n", prog);
+    printf("  %s sig                 OEM 设备签名 (熔丝 hex -> R127 只读标志)\n", prog);
+    printf("  %s sigprobe            签名寄存器攻防演示 (越权写被屏蔽)\n", prog);
+    printf("  %s hwdev [cmd]         hw_dev 命令分发 (无参=演示; 命令串须含 \"\\n\\r \" 尾缀)\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -276,9 +435,20 @@ int main(int argc, char** argv) {
     } else if (strcmp(cmd, "kvm") == 0) {
         return cmd_kvm(argc >= 3 ? argv[2] : "-");
     } else if (strcmp(cmd, "mo2kbc") == 0 && argc >= 3) {
-        return cmd_mo2kbc(argv[2]);
+        const char* outpath = NULL;
+        const char* srcpath = argv[2];
+        if (strcmp(argv[2], "-o") == 0 && argc >= 5) { outpath = argv[3]; srcpath = argv[4]; }
+        return cmd_mo2kbc(srcpath, outpath);
+    } else if (strcmp(cmd, "interact") == 0 && argc >= 3) {
+        return cmd_interact(argv[2]);
     } else if (strcmp(cmd, "hwprobe") == 0) {
         return hw_demo_run();
+    } else if (strcmp(cmd, "sig") == 0) {
+        return hw_oem_sig_cli();
+    } else if (strcmp(cmd, "sigprobe") == 0) {
+        return hw_sigprobe_run();
+    } else if (strcmp(cmd, "hwdev") == 0) {
+        return cmd_hwdev(argc >= 3 ? argv[2] : NULL);
     } else {
         print_usage(argv[0]);
         return 1;

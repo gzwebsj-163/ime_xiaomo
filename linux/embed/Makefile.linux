@@ -1,0 +1,82 @@
+# linux/embed — xiaomo 阶段六：嵌入式 Linux 内核核心
+#
+# 把 TinyEMU 封装成 C 模块。这里用统一宏（无 CONFIG_X86EMU/SLIRP/SDL/FS_NET）
+# 在 build/ 下重新编译 TinyEMU 核心，只编 riscv 路径，避免复用旧 .o 带进
+# x86 等无关符号。去掉带 main 的 temu.o（依赖 termios 终端），
+# 改用自研环形缓冲控制台（linux_embed.c）。
+
+TEMU_DIR = ../tinyemu-2019-12-21
+BUILD = build
+
+CC = gcc
+CFLAGS = -O2 -Wall -g -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_GNU_SOURCE \
+         -DCONFIG_RISCV_MAX_XLEN=128 -I$(TEMU_DIR)
+LDFLAGS = -lm
+
+# riscv 路径核心源（无 x86 / 网络 / 显示 / 终端）
+CORE_SRCS = cutils.c iomem.c virtio.c pci.c json.c machine.c simplefb.c \
+            fs.c fs_disk.c riscv_machine.c softfp.c
+CORE_OBJS = $(CORE_SRCS:%.c=$(BUILD)/%.o)
+
+RISCV_OBJS = $(BUILD)/riscv_cpu32.o $(BUILD)/riscv_cpu64.o $(BUILD)/riscv_cpu128.o
+
+all: linux_embed_demo
+
+$(BUILD):
+	mkdir -p $(BUILD)
+
+$(BUILD)/%.o: $(TEMU_DIR)/%.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD)/riscv_cpu32.o: $(TEMU_DIR)/riscv_cpu.c | $(BUILD)
+	$(CC) $(CFLAGS) -DMAX_XLEN=32 -c -o $@ $<
+$(BUILD)/riscv_cpu64.o: $(TEMU_DIR)/riscv_cpu.c | $(BUILD)
+	$(CC) $(CFLAGS) -DMAX_XLEN=64 -c -o $@ $<
+$(BUILD)/riscv_cpu128.o: $(TEMU_DIR)/riscv_cpu.c | $(BUILD)
+	$(CC) $(CFLAGS) -DMAX_XLEN=128 -c -o $@ $<
+
+linux_embed_demo: linux_embed.o linux_embed_demo.o $(CORE_OBJS) $(RISCV_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+linux_embed.o: linux_embed.c linux_embed.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+linux_embed_demo.o: linux_embed_demo.c linux_embed.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -rf $(BUILD) linux_embed.o linux_embed_demo.o linux_embed_demo
+	rm -rf $(XBUILD) xiaomo-linux
+
+.PHONY: all clean
+
+# ==================================================================
+# 阶段六收官: xiaomo-linux — .mo 源码直驱真 Linux 内核
+# 链接: xiaomo 全源码(字节码核) + linux_embed.o + TinyEMU 核心
+# 做法: 与 embed 共用 linux_embed.o + build/*.o (TinyEMU 核心),
+#       另在 build-xiaomo/ 下用 g++ 重编 xiaomo 源码(不动主构建的 .o)。
+# ==================================================================
+XIAOMO_DIR = ../..
+XBUILD = build-xiaomo
+XCC = g++
+XCFLAGS = -Wall -std=c++17 -g -O2 -I$(XIAOMO_DIR)/include
+
+# 与 xiaomo 主 Makefile 一致的源码清单 (全部 .mo→字节码 相关源 + hw)
+XIAOMO_SRCS = $(XIAOMO_DIR)/src/lexer.c $(XIAOMO_DIR)/src/parser.c \
+              $(XIAOMO_DIR)/src/ast.c $(XIAOMO_DIR)/src/vm.c \
+              $(XIAOMO_DIR)/src/vm_core.c $(XIAOMO_DIR)/src/vm_stack.c \
+              $(XIAOMO_DIR)/src/mo2kbc.c $(XIAOMO_DIR)/src/tensor.c \
+              $(XIAOMO_DIR)/src/nd_tensor.c $(XIAOMO_DIR)/src/weights.c \
+              $(XIAOMO_DIR)/src/main.c \
+              $(XIAOMO_DIR)/src/hw/hw_direct.c $(XIAOMO_DIR)/src/hw/hw_demo.c
+XIAOMO_OBJS = $(patsubst $(XIAOMO_DIR)/%.c,$(XBUILD)/%.o,$(XIAOMO_SRCS))
+
+$(XBUILD)/%.o: $(XIAOMO_DIR)/%.c
+	mkdir -p $(dir $@)
+	$(XCC) $(XCFLAGS) -x c++ -c -o $@ $<
+
+xiaomo-linux: $(XIAOMO_OBJS) linux_embed.o $(CORE_OBJS) $(RISCV_OBJS)
+	$(XCC) $(XCFLAGS) -o $@ $^ $(LDFLAGS) -lpthread \
+	    -lpthread
+
+.PHONY: xiaomo-linux

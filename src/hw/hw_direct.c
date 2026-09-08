@@ -22,6 +22,269 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+
+/* ============================================================
+ * 跨平台支持
+ * 非 macOS 平台 (Android Termux / Linux) 编译空实现 stub,
+ * 所有硬件函数返回"不支持"错误, 保证链接不断。
+ * ============================================================ */
+#ifndef __APPLE__
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+static char hw_stub_error[64] = "hardware access not supported on this platform";
+const char* hw_get_error(void) { return hw_stub_error; }
+static void hw_set_error(const char* fmt, ...) { (void)fmt; }
+int hw_inb(uint16_t port, uint8_t* val) { (void)port; (void)val; return -1; }
+int hw_outb(uint16_t port, uint8_t val) { (void)port; (void)val; return -1; }
+int hw_inl(uint16_t port, uint32_t* val) { (void)port; (void)val; return -1; }
+int hw_outl(uint16_t port, uint32_t val) { (void)port; (void)val; return -1; }
+int hw_pci_read(uint8_t bus, uint8_t dev, uint8_t func, uint32_t offset, uint32_t* val, int width) { (void)bus;(void)dev;(void)func;(void)offset;(void)val;(void)width; return -1; }
+int hw_pci_write(uint8_t bus, uint8_t dev, uint8_t func, uint32_t offset, uint32_t val, int width) { (void)bus;(void)dev;(void)func;(void)offset;(void)val;(void)width; return -1; }
+int hw_mmio_map(uint64_t phys_addr, uint64_t size) { (void)phys_addr;(void)size; return -1; }
+int hw_mmio_unmap(void) { return -1; }
+int hw_mmio_read(uint64_t offset, uint64_t* val, int width) { (void)offset;(void)val;(void)width; return -1; }
+int hw_mmio_write(uint64_t offset, uint64_t val, int width) { (void)offset;(void)val;(void)width; return -1; }
+int hw_msr_read(uint32_t msr_addr, uint64_t* val) { (void)msr_addr;(void)val; return -1; }
+int hw_msr_write(uint32_t msr_addr, uint64_t val) { (void)msr_addr;(void)val; return -1; }
+int hw_pci_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_usb_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_serial_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_cpu_info(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_uart_open(const char* path, int baud) { (void)path;(void)baud; return -1; }
+int hw_uart_close(int handle) { (void)handle; return -1; }
+int hw_uart_read(int handle, uint8_t* buf, int maxlen) { (void)handle;(void)buf;(void)maxlen; return -1; }
+int hw_uart_write(int handle, const uint8_t* buf, int len) { (void)handle;(void)buf;(void)len; return -1; }
+int hw_phys_mem_info(uint64_t* total, uint64_t* free_bytes) { (void)total;(void)free_bytes; return -1; }
+int hw_spi_open(const char* dev_path, int mode, int bits, int speed) { (void)dev_path;(void)mode;(void)bits;(void)speed; return -1; }
+int hw_spi_close(int handle) { (void)handle; return -1; }
+int hw_spi_transfer(int handle, const uint8_t* tx, uint8_t* rx, int len) { (void)handle;(void)tx;(void)rx;(void)len; return -1; }
+int hw_gpio_export(int pin) { (void)pin; return -1; }
+int hw_gpio_set_direction(int pin, int output) { (void)pin;(void)output; return -1; }
+int hw_gpio_write(int pin, int val) { (void)pin;(void)val; return -1; }
+int hw_gpio_read(int pin) { (void)pin; return -1; }
+
+/* ==== I2C / PWM (2026-09-07, hw_dev 设备命令层底层支撑) ====
+ * Linux: 真实实现 (用户态, 无内核头依赖)
+ *   I2C = /dev/i2c-N ioctl (I2C_SLAVE_FORCE + I2C_RDWR 组合传输)
+ *   PWM = /sys/class/pwm sysfs 读写
+ * 其他非 Apple 平台: 桩返回 -1。 */
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <errno.h>
+#include <dirent.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+
+/* 不 include <linux/i2c-dev.h>: 自带内核 ABI 定义 (布局须与内核一致,
+ * Termux/bionic 无该头, glibc 下自定义同名类型也不冲突——不拉系统头)。 */
+#define HW_I2C_SLAVE_FORCE 0x0706
+#define HW_I2C_RDWR        0x0707
+#define HW_I2C_M_RD        0x0001
+struct hw_i2c_msg   { uint16_t addr; uint16_t flags; uint16_t len; uint8_t* buf; };
+struct hw_i2c_rdwr  { struct hw_i2c_msg* msgs; uint32_t nmsgs; };
+
+/* handle(fd) → 从站地址 注册表 (I2C_RDWR 每 msg 需自带 addr) */
+#define HW_I2C_MAX_H 16
+static struct { int fd; uint16_t addr; } hw_i2c_h[HW_I2C_MAX_H];
+static void hw_i2c_h_init(void) {
+    for (int i = 0; i < HW_I2C_MAX_H; i++) hw_i2c_h[i].fd = -1;
+}
+static void hw_i2c_h_set(int fd, uint16_t addr) {
+    for (int i = 0; i < HW_I2C_MAX_H; i++)
+        if (hw_i2c_h[i].fd == -1) { hw_i2c_h[i].fd = fd; hw_i2c_h[i].addr = addr; return; }
+}
+static void hw_i2c_h_del(int fd) {
+    for (int i = 0; i < HW_I2C_MAX_H; i++)
+        if (hw_i2c_h[i].fd == fd) { hw_i2c_h[i].fd = -1; return; }
+}
+static uint16_t hw_i2c_h_addr(int fd) {
+    for (int i = 0; i < HW_I2C_MAX_H; i++)
+        if (hw_i2c_h[i].fd == fd) return hw_i2c_h[i].addr;
+    return 0xFFFF;
+}
+
+int hw_i2c_open(const char* dev_path, uint16_t addr) {
+    if (!dev_path) return -1;
+    static int inited = 0;
+    if (!inited) { hw_i2c_h_init(); inited = 1; }
+    int fd = open(dev_path, O_RDWR);
+    if (fd < 0) return -1;
+    if (ioctl(fd, HW_I2C_SLAVE_FORCE, (unsigned long)addr) < 0) { close(fd); return -1; }
+    hw_i2c_h_set(fd, addr);
+    return fd;
+}
+int hw_i2c_close(int handle) {
+    if (handle < 0) return -1;
+    hw_i2c_h_del(handle);
+    return (close(handle) == 0) ? 0 : -1;
+}
+int hw_i2c_write(int handle, const uint8_t* buf, int len) {
+    if (handle < 0 || !buf || len <= 0) return -1;
+    return (write(handle, buf, (size_t)len) == (ssize_t)len) ? len : -1;
+}
+int hw_i2c_read(int handle, uint8_t* buf, int maxlen) {
+    if (handle < 0 || !buf || maxlen <= 0) return -1;
+    ssize_t n = read(handle, buf, (size_t)maxlen);
+    return (n >= 0) ? (int)n : -1;
+}
+int hw_i2c_xfer(int handle, const uint8_t* tx, int txlen, uint8_t* rx, int rxmaxlen) {
+    if (handle < 0 || (rxmaxlen > 0 && !rx)) return -1;
+    uint16_t addr = hw_i2c_h_addr(handle);
+    struct hw_i2c_msg msgs[2]; int n = 0;
+    if (tx && txlen > 0) {
+        msgs[n].addr = addr; msgs[n].flags = 0;
+        msgs[n].len = (uint16_t)txlen; msgs[n].buf = (uint8_t*)tx; n++;
+    }
+    if (rx && rxmaxlen > 0) {
+        msgs[n].addr = addr; msgs[n].flags = HW_I2C_M_RD;
+        msgs[n].len = (uint16_t)rxmaxlen; msgs[n].buf = rx; n++;
+    }
+    if (n == 0) return -1;
+    struct hw_i2c_rdwr d = { msgs, (uint32_t)n };
+    if (ioctl(handle, HW_I2C_RDWR, &d) < 0) return -1;
+    return rxmaxlen; /* 成功返回预期读到的字节数 */
+}
+int hw_i2c_enumerate(char* buf, int buflen) {
+    if (!buf || buflen <= 0) return -1;
+    buf[0] = '\0';
+    DIR* d = opendir("/dev");
+    if (!d) return -1;
+    struct dirent* e; int n = 0;
+    while ((e = readdir(d)) != NULL && n < buflen - 1) {
+        if (strncmp(e->d_name, "i2c-", 4) != 0) continue;
+        if (n > 0) { buf[n++] = ' '; if (n >= buflen - 1) break; }
+        int l = (int)strlen(e->d_name);
+        if (n + l >= buflen - 1) break;
+        memcpy(buf + n, e->d_name, (size_t)l); n += l;
+    }
+    closedir(d);
+    buf[n] = '\0';
+    return n; /* 0 = 目录在但无设备, -1 = 目录打不开 */
+}
+
+/* ---- PWM sysfs ---- */
+static int hw_pwm_write_attr(const char* path, const char* val) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    size_t n = strlen(val);
+    ssize_t w = write(fd, val, n);
+    close(fd);
+    return (w == (ssize_t)n) ? 0 : -1;
+}
+int hw_pwm_export(int chip, int channel) {
+    char dir[160], v[16];
+    snprintf(dir, sizeof(dir), "/sys/class/pwm/pwmchip%d/pwm%d", chip, channel);
+    struct stat st;
+    if (stat(dir, &st) == 0) return 0; /* 已导出 */
+    snprintf(v, sizeof(v), "%d", channel);
+    char ex[160];
+    snprintf(ex, sizeof(ex), "/sys/class/pwm/pwmchip%d/export", chip);
+    return hw_pwm_write_attr(ex, v);
+}
+int hw_pwm_unexport(int chip, int channel) {
+    char ex[160], v[16];
+    snprintf(ex, sizeof(ex), "/sys/class/pwm/pwmchip%d/unexport", chip);
+    snprintf(v, sizeof(v), "%d", channel);
+    return hw_pwm_write_attr(ex, v);
+}
+static int hw_pwm_set_num(int chip, int channel, const char* attr, int val) {
+    char p[192], v[24];
+    snprintf(p, sizeof(p), "/sys/class/pwm/pwmchip%d/pwm%d/%s", chip, channel, attr);
+    snprintf(v, sizeof(v), "%d", val);
+    return hw_pwm_write_attr(p, v);
+}
+int hw_pwm_set_period(int chip, int channel, int period_ns) {
+    return hw_pwm_set_num(chip, channel, "period", period_ns);
+}
+int hw_pwm_set_duty(int chip, int channel, int duty_ns) {
+    return hw_pwm_set_num(chip, channel, "duty_cycle", duty_ns);
+}
+int hw_pwm_set_enable(int chip, int channel, int on) {
+    return hw_pwm_set_num(chip, channel, "enable", on ? 1 : 0);
+}
+int hw_pwm_read(int chip, int channel, const char* attr, char* buf, int buflen) {
+    if (!attr || !buf || buflen <= 0) return -1;
+    char p[192];
+    snprintf(p, sizeof(p), "/sys/class/pwm/pwmchip%d/pwm%d/%s", chip, channel, attr);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, (size_t)(buflen - 1));
+    close(fd);
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == ' ')) buf[--n] = '\0';
+    return (int)n;
+}
+int hw_pwm_enumerate(char* buf, int buflen) {
+    if (!buf || buflen <= 0) return -1;
+    buf[0] = '\0';
+    DIR* d = opendir("/sys/class/pwm");
+    if (!d) return -1;
+    struct dirent* e; int n = 0;
+    while ((e = readdir(d)) != NULL && n < buflen - 1) {
+        if (strncmp(e->d_name, "pwmchip", 7) != 0) continue;
+        if (n > 0) { buf[n++] = ' '; if (n >= buflen - 1) break; }
+        int l = (int)strlen(e->d_name);
+        if (n + l >= buflen - 1) break;
+        memcpy(buf + n, e->d_name, (size_t)l); n += l;
+    }
+    closedir(d);
+    buf[n] = '\0';
+    return n;
+}
+
+#else /* 非 Linux 非 Apple: 桩 */
+int hw_i2c_open(const char* dev_path, uint16_t addr) { (void)dev_path;(void)addr; return -1; }
+int hw_i2c_close(int handle) { (void)handle; return -1; }
+int hw_i2c_write(int handle, const uint8_t* buf, int len) { (void)handle;(void)buf;(void)len; return -1; }
+int hw_i2c_read(int handle, uint8_t* buf, int maxlen) { (void)handle;(void)buf;(void)maxlen; return -1; }
+int hw_i2c_xfer(int handle, const uint8_t* tx, int txlen, uint8_t* rx, int rxmaxlen) { (void)handle;(void)tx;(void)txlen;(void)rx;(void)rxmaxlen; return -1; }
+int hw_i2c_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_pwm_export(int chip, int channel) { (void)chip;(void)channel; return -1; }
+int hw_pwm_unexport(int chip, int channel) { (void)chip;(void)channel; return -1; }
+int hw_pwm_set_period(int chip, int channel, int period_ns) { (void)chip;(void)channel;(void)period_ns; return -1; }
+int hw_pwm_set_duty(int chip, int channel, int duty_ns) { (void)chip;(void)channel;(void)duty_ns; return -1; }
+int hw_pwm_set_enable(int chip, int channel, int on) { (void)chip;(void)channel;(void)on; return -1; }
+int hw_pwm_read(int chip, int channel, const char* attr, char* buf, int buflen) { (void)chip;(void)channel;(void)attr;(void)buf;(void)buflen; return -1; }
+int hw_pwm_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+#endif /* __linux__ */
+
+#ifdef __cplusplus
+}
+#endif
+
+#else /* __APPLE__ */
+
+
+/* ==== macOS 平台完整实现 ==== */
+/*
+ * xiaomo - 硬件直访模块 (Hardware Direct Access)
+ *
+ * 功能: 让 Kills VM 能通过指令直接访问底层硬件
+ *   - IO 端口读写 (IN/OUT)
+ *   - PCI 配置空间读写
+ *   - 内存映射 IO (MMIO)
+ *   - MSR 寄存器访问
+ *   - 设备枚举 (PCI/USB/串口)
+ *
+ * 平台: macOS / x86-64
+ * 依赖: IOKit (PCI), CoreFoundation (设备枚举)
+ *
+ * 安全: 所有操作需要 root 权限 (IO 端口 / MSR / MMIO)
+ *       在 macOS 上 IO 端口和 MSR 需要内核扩展支持
+ *       本模块提供用户态能用的最佳替代方案
+ */
+
+#include "hw_direct.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -677,3 +940,19 @@ int hw_phys_mem_info(uint64_t* total, uint64_t* free_bytes) {
     }
     return 0;
 }
+
+/* ==== I2C / PWM macOS 桩 (2026-09-07): macOS 无 /dev/i2c 与 pwmchip sysfs ==== */
+int hw_i2c_open(const char* dev_path, uint16_t addr) { (void)dev_path;(void)addr; return -1; }
+int hw_i2c_close(int handle) { (void)handle; return -1; }
+int hw_i2c_write(int handle, const uint8_t* buf, int len) { (void)handle;(void)buf;(void)len; return -1; }
+int hw_i2c_read(int handle, uint8_t* buf, int maxlen) { (void)handle;(void)buf;(void)maxlen; return -1; }
+int hw_i2c_xfer(int handle, const uint8_t* tx, int txlen, uint8_t* rx, int rxmaxlen) { (void)handle;(void)tx;(void)txlen;(void)rx;(void)rxmaxlen; return -1; }
+int hw_i2c_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+int hw_pwm_export(int chip, int channel) { (void)chip;(void)channel; return -1; }
+int hw_pwm_unexport(int chip, int channel) { (void)chip;(void)channel; return -1; }
+int hw_pwm_set_period(int chip, int channel, int period_ns) { (void)chip;(void)channel;(void)period_ns; return -1; }
+int hw_pwm_set_duty(int chip, int channel, int duty_ns) { (void)chip;(void)channel;(void)duty_ns; return -1; }
+int hw_pwm_set_enable(int chip, int channel, int on) { (void)chip;(void)channel;(void)on; return -1; }
+int hw_pwm_read(int chip, int channel, const char* attr, char* buf, int buflen) { (void)chip;(void)channel;(void)attr;(void)buf;(void)buflen; return -1; }
+int hw_pwm_enumerate(char* buf, int buflen) { (void)buf;(void)buflen; return -1; }
+#endif /* __APPLE__ */

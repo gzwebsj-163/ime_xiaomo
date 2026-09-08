@@ -416,7 +416,8 @@ static AstNode* parse_print(Parser* p) {
             match(p, TOK_RBRACKET);
             node_list_add(&n->args, idx);
         }
-        break; /* 一行一条 */
+        /* 链式 print: >> print >> a >> b >> c 全部并入同一 NODE_PRINT 的 args,
+         * 由编译器按"首段新行/后续段追加"生成, 避免拆成多行碎消息。 */
     }
     return n;
 }

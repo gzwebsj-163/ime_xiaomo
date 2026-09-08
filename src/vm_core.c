@@ -16,9 +16,40 @@
  */
 #include "vm_core.h"
 #include "hw_direct.h"
+#include "hw_oem.h"
+#include "hw_dev.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+/* ================= 嵌入式 Linux 内核核心 (阶段六): 弱符号桥 =================
+ * 主构建(不链接 TinyEMU)时, 这里提供弱定义空实现 → LINUX opcode 返回
+ * "not supported", 程序不崩、其余功能不受影响。
+ * 用 Makefile 链接 linux_embed.o + TinyEMU 核心时, linux_embed.c 的强符号
+ * 自动覆盖这些弱符号 → 真 Linux 内核可被 .mo 字节码直接驱动。
+ * 注意: 与 linux_embed.h 的声明保持完全一致(签名/语义)。
+ */
+typedef struct LinuxVM LinuxVM;
+/* 注意: 本文件被主构建以 C++ 编译(g++ -x c++), 若不加 extern "C" 弱符号会
+ * 变成 C++ 修饰名(__Z...), 与 linux_embed.o(gcc 编译) 的 C 名 _linux_init
+ * 对不上 → 强符号永远无法覆盖弱符号, 真内核不被调用(只走空实现)。
+ * 统一用 extern "C" 让两边符号名一致。 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+__attribute__((weak)) LinuxVM *linux_init(const char *cfg_path) { (void)cfg_path; return NULL; }
+__attribute__((weak)) int linux_exec(LinuxVM *vm, const char *cmd, const char *expect, int timeout_ms) { (void)vm;(void)cmd;(void)expect;(void)timeout_ms; return -1; }
+__attribute__((weak)) int linux_read_output(LinuxVM *vm, char *buf, int buf_size) { (void)vm;(void)buf;(void)buf_size; return 0; }
+__attribute__((weak)) int linux_has_output(LinuxVM *vm) { (void)vm; return 0; }
+__attribute__((weak)) void linux_end(LinuxVM *vm) { (void)vm; }
+#ifdef __cplusplus
+}
+#endif
 
 /* ================= 程序构建 ================= */
 KillsProgram* kprog_new(void) {
@@ -35,6 +66,17 @@ void kprog_add_ins(KillsProgram* p, uint8_t op, int32_t a, int32_t b, int64_t im
 
 int kprog_add_const(KillsProgram* p, uint8_t type, int64_t iv, double fv, const char* sv) {
     if (!p) return -1;
+    /* 去重: 字符串按文本、数值按 type+iv 精确匹配。
+     * 关键: 同文本字符串复用同一常量索引 → 变量负常量标记 -(ci+1) 一致 →
+     * 编译路径字符串 == 比较直接 JE 寄存器即语义正确 (probe_cap T2 根因)。 */
+    for (uint32_t i = 0; i < p->const_count; i++) {
+        KillsConst* c = &p->consts[i];
+        if (type == 1) {
+            if (c->type == 1 && c->sv && sv && strcmp(c->sv, sv) == 0) return (int)i;
+        } else {
+            if (c->type == type && c->iv == iv && c->fv == fv) return (int)i;
+        }
+    }
     p->consts = (KillsConst*)realloc(p->consts, sizeof(KillsConst) * (p->const_count + 1));
     KillsConst* c = &p->consts[p->const_count++];
     c->type = type; c->iv = iv; c->fv = fv;
@@ -92,11 +134,135 @@ static void kvm_add_output_ex(KillsVM* vm, const char* s, int append) {
 }
 static void kvm_add_output(KillsVM* vm, const char* s) { kvm_add_output_ex(vm, s, 0); }
 
+/* ── output flush: 只在 input_wait 等待时调用 (对齐 ESP32 版) ──
+ * 链式 print/LLM append 的拼接机制依赖 output[last] 持续累积;
+ * 每轮回复完整缓冲后, 回到 input_wait 阻塞等待下一轮输入 → 此刻 flush
+ * 恰好整行输出一轮回复。⚠️ 不能在每条指令后 flush(拆碎拼接)。 */
+static void kvm_flush_output(KillsVM* vm) {
+    if (vm->output_count > 0) {
+        for (int i = 0; i < vm->output_count; i++) {
+            if (vm->output[i]) {
+                printf("%s\n", vm->output[i]);
+                free(vm->output[i]);
+                vm->output[i] = NULL;
+            }
+        }
+        vm->output_count = 0;
+        fflush(stdout);
+    }
+}
+
 /* ================= FFI 表 (内置外部函数) ================= */
-/* FFI idx: 0=print_int, 1=print_str, 2=sqrt, 3=halt_print_reg */
+/* FFI idx: 0=print_int, 1=print_str, 2=sqrt,
+            3=input_pending (0/1), 4=input_read(→ hash cid) */
 typedef struct { int64_t result; const char* str; } FFIRet;
 
 static long ffi_int_arg(KillsVM* vm, int reg) { return (long)vm->regs[reg]; }
+
+/* ── 交互输入桥 ──────────────────────────────────────────────
+ * openclaw 交互系统: VM 从"输入源"逐行读用户消息。
+ * 宿主(host): 从 stdin 读; ESP32: 从 TCP 读。
+ * ⚠️ FIFO 队列(16 槽)而不是单缓冲: 批量注入(nc 粘贴/管道多发)时
+ *   单缓冲会被最后一条覆盖丢消息; 队列保证逐条消费不丢。
+ *   且 llm_query 阻塞期间新消息只入队, 不会覆盖当前正在处理的 g_input_line
+ *   (llm_query_host 依赖它做 cid 分类, 单缓冲下会被新消息污染)。 */
+#define IO_Q_CAP 16
+#define IO_Q_LEN 2048
+static char g_io_q[IO_Q_CAP][IO_Q_LEN];
+static int  g_io_head = 0, g_io_tail = 0, g_io_count = 0;
+static char g_input_line[IO_Q_LEN] = "";   /* VM 正在处理的那一行 */
+/* 供外部(宿主 main / ESP32 任务)写入待处理输入; 满则丢弃最老并提示 */
+void kvm_io_push(const char* line) {
+    if (g_io_count >= IO_Q_CAP) { fprintf(stderr, "[io] queue full, dropping oldest\n"); g_io_head = (g_io_head + 1) % IO_Q_CAP; g_io_count--; }
+    snprintf(g_io_q[g_io_tail], IO_Q_LEN, "%s", line);
+    g_io_tail = (g_io_tail + 1) % IO_Q_CAP; g_io_count++;
+}
+void kvm_io_pushf(const char* fmt, ...) {
+    char tmp[IO_Q_LEN];
+    va_list ap; va_start(ap, fmt); vsnprintf(tmp, IO_Q_LEN, fmt, ap); va_end(ap);
+    kvm_io_push(tmp);
+}
+void kvm_io_set_pending(int v){ if (!v && g_io_count == 0) { } }  /* 兼容旧调用: 清空队列可选 */
+int  kvm_io_pending(void){ return g_io_count > 0; }
+const char* kvm_io_line(void){ return g_input_line; }
+/* 弹出队首到 g_input_line (VM 消费); 空则返回 0 */
+static int kvm_io_pop(void) {
+    if (g_io_count <= 0) return 0;
+    snprintf(g_input_line, IO_Q_LEN, "%s", g_io_q[g_io_head]);
+    g_io_head = (g_io_head + 1) % IO_Q_CAP; g_io_count--;
+    return 1;
+}
+
+/* 简单中文/英文关键词分类 → cid (供 .mo 路由):
+ *   1 打招呼(hi/hello/你好/在吗)  2 跑工具/计算(算/工具/tool/计算/weather)
+ *   3 查状态(status/状态/几点/时间)  4 其它/闲聊
+ * 输入行同时回显到 output, 便于双端对拍与 TCP 转发。 */
+static int input_classify(const char* s) {
+    const struct { const char* kw; int cid; } tab[] = {
+        {"你好",1},{"在吗",1},{"hi",1},{"hi ",1},{"hello",1},{"hello ",1},
+        {"工具",2},{"tool",2},{"算",2},{"计算",2},{"weather",2},{"天气",2},
+        {"状态",3},{"status",3},{"几点",3},{"时间",3},{"现在",3},
+    };
+    for (size_t i = 0; i < sizeof(tab)/sizeof(tab[0]); i++)
+        if (strstr(s, tab[i].kw)) return tab[i].cid;
+    return 4;
+}
+
+/* ── FFI 6: llm_query_host() 宿主版真实 LLM 回复 ──
+ * 链路: VM → TCP → 本地网关 127.0.0.1:9101 (llm_gate.py) → SiliconFlow
+ * 协议: [4B 大端 len][payload] 请求; [4B 大端 len][reply] 回复 (可含换行) */
+#define LLM_GATE_HOST   "127.0.0.1"
+#define LLM_GATE_PORT_H 9101
+
+static int llm_query_host(KillsVM* vm) {
+    char payload[2300];
+    int cid = input_classify(g_input_line);
+    char esc[4600]; int e = 0;
+    for (int i = 0; g_input_line[i] && e < (int)sizeof(esc)-2; i++) {
+        char c = g_input_line[i];
+        if (c == '"')  { esc[e++]='\\'; esc[e++]='"'; }
+        else if (c == '\\') { esc[e++]='\\'; esc[e++]='\\'; }
+        else if (c == '\n' || c == '\r') { esc[e++]=' '; }
+        else esc[e++] = c;
+    }
+    esc[e] = '\0';
+    snprintf(payload, sizeof(payload), "{\"cid\":%d,\"msg\":\"%s\"}", cid, esc);
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { fprintf(stderr, "[llm] socket fail\n"); return 0; }
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(LLM_GATE_PORT_H);
+    sa.sin_addr.s_addr = inet_addr(LLM_GATE_HOST);
+    struct timeval tv = { .tv_sec = 35, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
+        fprintf(stderr, "[llm] connect %s:%d fail\n", LLM_GATE_HOST, LLM_GATE_PORT_H);
+        close(fd); return 0;
+    }
+    uint32_t nlen = htonl((uint32_t)strlen(payload));
+    if (send(fd, &nlen, 4, 0) != 4 || send(fd, payload, strlen(payload), 0) <= 0) {
+        fprintf(stderr, "[llm] send fail\n"); close(fd); return 0;
+    }
+    uint32_t rbe = 0; int got = 0;
+    while (got < 4) { int n = recv(fd, ((char*)&rbe)+got, 4-got, 0); if (n <= 0) break; got += n; }
+    if (got < 4) { fprintf(stderr, "[llm] recv hdr fail got=%d\n", got); close(fd); return 0; }
+    uint32_t rlen = ntohl(rbe);
+    if (rlen == 0 || rlen > 4096) { fprintf(stderr, "[llm] bad rlen=%u\n", rlen); close(fd); return 0; }
+    char* reply = (char*)malloc(rlen+1);
+    if (!reply) { close(fd); return 0; }
+    got = 0;
+    while (got < (int)rlen) { int n = recv(fd, reply+got, rlen-got, 0); if (n <= 0) break; got += n; }
+    close(fd);
+    if (got < (int)rlen) { fprintf(stderr, "[llm] recv body fail got=%d/%u\n", got, rlen); free(reply); return 0; }
+    reply[got] = '\0';
+    for (int i = 0; reply[i]; i++) if (reply[i]=='\n' || reply[i]=='\r') reply[i] = ' ';
+    kvm_add_output_ex(vm, reply, 1);   /* append 到当前行 */
+    fprintf(stderr, "[llm] reply (%u B): %.100s\n", rlen, reply);
+    free(reply);
+    return 1;
+}
 
 static void kvm_ffi(KillsVM* vm, int idx, int result_reg) {
     switch (idx) {
@@ -113,6 +279,35 @@ static void kvm_ffi(KillsVM* vm, int idx, int result_reg) {
     case 2: { /* sqrt from reg a into result_reg */
         double v = (double)ffi_int_arg(vm, vm->regs[63] & 63);
         vm->regs[result_reg] = (int64_t)(v * v); break; /* 简单平方 */
+    }
+    case 3: { /* input_pending() → result_reg = 0/1 */
+        vm->regs[result_reg] = kvm_io_pending() ? 1 : 0; break;
+    }
+    case 4: { /* input_read() → 消费一行, 回显, result_reg = 分类 cid */
+        if (!kvm_io_pop()) { vm->regs[result_reg] = 0; break; }
+        /* 回显到 output (TCP 侧据此可见用户原话) */
+        char echo[2100]; snprintf(echo, sizeof(echo), "> %s", g_input_line);
+        kvm_add_output(vm, echo);
+        int cid = input_classify(g_input_line);
+        vm->regs[result_reg] = cid;
+        break;
+    }
+    case 5: { /* input_wait() → 阻塞直到有输入, 消费, result_reg = 分类 cid
+                  (宿主: 轮询+usleep 让步 + flush 对齐 ESP32 版;
+                   ⚠️ 轮询等待期间 flush: LLM 回复 append 到已有行, count 不变,
+                   交互主线程按 count 增量轮询看不到 → 必须靠这里整行 flush) */
+        while (!kvm_io_pop()) { kvm_flush_output(vm); usleep(20000); }
+        char echo[2100]; snprintf(echo, sizeof(echo), "> %s", g_input_line);
+        kvm_add_output(vm, echo);
+        int cid = input_classify(g_input_line);
+        vm->regs[result_reg] = cid;
+        break;
+    }
+    case 6: { /* llm_query() → 真实 LLM 回复 (宿主 POSIX 版: 连本地网关 127.0.0.1:9101)
+                  llm_gate.py 转发 SiliconFlow → 回复 append 到当前行 */
+        int ok = llm_query_host(vm);
+        vm->regs[result_reg] = ok ? 1 : 0;
+        break;
     }
     default: break;
     }
@@ -156,7 +351,13 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
     vstack_reset(&vm->callstack);
     memset(vm->regs, 0, sizeof(vm->regs));
 
-    /* 每帧保存: 返回 PC + 64 寄存器 = 1+64 个 u64 */
+    /* OEM 设备签名上电烧录: 熔丝值固化进 R127, 全程写保护见循环末尾 */
+    hw_oem_protect(vm);
+
+    /* hw_dev 命令表上电初始化: 清动态注册表 (旧表不跨运行残留) */
+    hw_dev_init(NULL);
+
+    /* 每帧保存: 返回 PC + 快照区寄存器 = 1+KILLS_SNAP_NREG 个 u64 */
     while (!vm->halted) {
         if (vm->steps++ > vm->step_limit) {
             snprintf(vm->error_msg, sizeof(vm->error_msg), "step limit exceeded (%u)", vm->step_limit);
@@ -184,6 +385,13 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
               if (d == 0) { snprintf(vm->error_msg,sizeof(vm->error_msg),"mod by zero at pc %u",vm->pc); vm->error_count=1; return 1; }
               vm->regs[ins->a] = vm->regs[ins->a] % d; break; }
         case OP_AND: vm->regs[ins->a] = vm->regs[ins->a] & (is_reg_operand(ins->b) ? vm->regs[ins->b] : ins->imm); break;
+        /* ---- 浮点扩展: 寄存器 64 位值 = double 位模式 ---- */
+        case OP_FADD: { double x, y; memcpy(&x, &vm->regs[ins->a], 8); memcpy(&y, &vm->regs[ins->b], 8); double z = x + y; memcpy(&vm->regs[ins->a], &z, 8); break; }
+        case OP_FSUB: { double x, y; memcpy(&x, &vm->regs[ins->a], 8); memcpy(&y, &vm->regs[ins->b], 8); double z = x - y; memcpy(&vm->regs[ins->a], &z, 8); break; }
+        case OP_FMUL: { double x, y; memcpy(&x, &vm->regs[ins->a], 8); memcpy(&y, &vm->regs[ins->b], 8); double z = x * y; memcpy(&vm->regs[ins->a], &z, 8); break; }
+        case OP_FDIV: { double x, y; memcpy(&x, &vm->regs[ins->a], 8); memcpy(&y, &vm->regs[ins->b], 8); double z = (y == 0.0) ? (x / 0.0) : (x / y); memcpy(&vm->regs[ins->a], &z, 8); break; }
+        case OP_F2I:  { double x; memcpy(&x, &vm->regs[ins->a], 8); vm->regs[ins->a] = (int64_t)x; break; }  /* 截断, 对齐 val_float 的 ival */
+        case OP_I2F:  { double z = (double)vm->regs[ins->a]; memcpy(&vm->regs[ins->a], &z, 8); break; }
         case OP_OR:  vm->regs[ins->a] = vm->regs[ins->a] | (is_reg_operand(ins->b) ? vm->regs[ins->b] : ins->imm); break;
         case OP_XOR: vm->regs[ins->a] = vm->regs[ins->a] ^ (is_reg_operand(ins->b) ? vm->regs[ins->b] : ins->imm); break;
         case OP_NOT: vm->regs[ins->a] = ~vm->regs[ins->a]; break;
@@ -191,7 +399,7 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
         case OP_SHR: vm->regs[ins->a] = (int64_t)((uint64_t)vm->regs[ins->a] >> (is_reg_operand(ins->b) ? vm->regs[ins->b] : ins->imm)); break;
         case OP_PUSH:
             { int64_t v = is_reg_operand(ins->a) ? vm->regs[ins->a] : ins->imm;
-              vstack_push_u64(&vm->operand, (uint64_t)v); break; }
+              if (vstack_push_u64(&vm->operand, (uint64_t)v) != 0) { snprintf(vm->error_msg,sizeof(vm->error_msg),"operand stack overflow at pc %u",vm->pc); vm->error_count=1; return 1; } break; }
         case OP_POP:
             { uint64_t v; if (vstack_pop_u64(&vm->operand, &v) == 0) vm->regs[ins->a] = (int64_t)v; break; }
         case OP_LOAD:
@@ -205,16 +413,18 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
         case OP_LOAD64:
             { uint64_t addr = (uint64_t)vm->regs[ins->b];
               if (addr + 8 > prog->data_size) { snprintf(vm->error_msg,sizeof(vm->error_msg),"LOAD64 out of bounds %llu at pc %u",(unsigned long long)addr,vm->pc); vm->error_count=1; return 1; }
-              int64_t v; memcpy(&v, prog->data + addr, 8); vm->regs[ins->a] = v; break; }
+              int64_t v; memcpy(&v, prog->data + addr, 8); vm->regs[ins->a] = v;
+              if (getenv("KVM_TRACE")) fprintf(stderr, "[TRACE] LOAD64 pc=%u addr=%llu -> %lld (R%d)\n", vm->pc, (unsigned long long)addr, (long long)v, ins->a); break; }
         case OP_STORE64:
             { uint64_t addr = (uint64_t)vm->regs[ins->a];
               if (addr + 8 > prog->data_size) { snprintf(vm->error_msg,sizeof(vm->error_msg),"STORE64 out of bounds %llu at pc %u",(unsigned long long)addr,vm->pc); vm->error_count=1; return 1; }
-              int64_t v = vm->regs[ins->b]; memcpy(prog->data + addr, &v, 8); break; }
+              int64_t v = vm->regs[ins->b]; memcpy(prog->data + addr, &v, 8);
+              if (getenv("KVM_TRACE")) fprintf(stderr, "[TRACE] STORE64 pc=%u addr=%llu <- %lld (R%d)\n", vm->pc, (unsigned long long)addr, (long long)v, ins->b); break; }
         case OP_JMP: next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JZ:  if (vm->regs[ins->a] == 0) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JNZ: if (vm->regs[ins->a] != 0) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JE:  if (vm->regs[ins->a] == (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
-        case OP_JNE: if (vm->regs[ins->a] != (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
+        case OP_JNE: if (getenv("KVM_TRACE")) fprintf(stderr, "[TRACE] JNE pc=%u R%d=%lld vs R%d=%lld -> %s\n", vm->pc, ins->a, (long long)vm->regs[ins->a], ins->b, ins->b >= 0 ? (long long)vm->regs[ins->b] : 0LL, vm->regs[ins->a] != (ins->b >= 0 ? vm->regs[ins->b] : 0) ? "JUMP" : "fall"); if (vm->regs[ins->a] != (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JG:  if (vm->regs[ins->a] >  (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JGE: if (vm->regs[ins->a] >= (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
         case OP_JL:  if (vm->regs[ins->a] <  (ins->b >= 0 ? vm->regs[ins->b] : 0)) next_pc = vm->pc + (uint32_t)(int32_t)ins->imm; break;
@@ -225,18 +435,24 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
               KillsFunc* fn = &prog->funcs[fi];
               /* 从操作数栈弹 nparams 个实参 (逆序压入参数寄存器 R0..) */
               for (int k = fn->nparams - 1; k >= 0; k--) { uint64_t a; if (vstack_pop_u64(&vm->operand, &a) == 0) vm->regs[k] = (int64_t)a; }
-              /* 保存返回现场: 返回 PC + 64 寄存器 */
-              vstack_push_u64(&vm->callstack, (uint64_t)next_pc);
-              for (int r = 0; r < KILLS_NREG; r++) vstack_push_u64(&vm->callstack, (uint64_t)vm->regs[r]);
+              if (getenv("KVM_TRACE")) { fprintf(stderr, "[TRACE] CALL fn=%d entry=%u nparams=%d", fi, fn->pc, fn->nparams); for (int k = 0; k < fn->nparams && k < 4; k++) fprintf(stderr, " R%d=%lld", k, (long long)vm->regs[k]); fprintf(stderr, "\n"); }
+              /* 保存返回现场: 返回 PC + 快照区寄存器。
+               * ⚠️ push 失败不可静默忽略: 否则 RET 会弹到垃圾现场,
+               * next_pc 野生跳转 → 寄存器堆越界写 → 堆腐蚀 (ch340_dock 段错误链路)。 */
+              if (vstack_push_u64(&vm->callstack, (uint64_t)next_pc) != 0) { snprintf(vm->error_msg,sizeof(vm->error_msg),"call stack overflow at pc %u",vm->pc); vm->error_count=1; return 1; }
+              for (int r = 0; r < KILLS_SNAP_NREG; r++) { if (vstack_push_u64(&vm->callstack, (uint64_t)vm->regs[r]) != 0) { snprintf(vm->error_msg,sizeof(vm->error_msg),"call stack overflow at pc %u",vm->pc); vm->error_count=1; return 1; } }
               next_pc = fn->pc;
               break; }
         case OP_RET:
             { /* 恢复现场但不覆盖 R0 (R0 约定为返回值寄存器) */
-              for (int r = KILLS_NREG - 1; r >= 1; r--) { uint64_t v; if (vstack_pop_u64(&vm->callstack, &v) == 0) vm->regs[r] = (int64_t)v; }
+              if (getenv("KVM_TRACE")) fprintf(stderr, "[TRACE] RET at pc=%u R0=%lld\n", vm->pc, (long long)vm->regs[0]);
+              for (int r = KILLS_SNAP_NREG - 1; r >= 1; r--) { uint64_t v; if (vstack_pop_u64(&vm->callstack, &v) == 0) vm->regs[r] = (int64_t)v; }
               uint64_t r0; if (vstack_pop_u64(&vm->callstack, &r0) == 0) { /* 丢弃保存的 R0, 保留当前 R0=返回值 */ }
               uint64_t retpc; if (vstack_pop_u64(&vm->callstack, &retpc) == 0) next_pc = (uint32_t)retpc; break; }
         case OP_PRINT:
-            { int append = (ins->imm == 1);
+            { int append = (ins->imm & 1);
+              int raw = (ins->imm & 2);   /* raw: 直接打印整数值(允许负数) */
+              int ffmt = (ins->imm & 4);  /* ffmt: 按 double 位模式 %g 打印 (浮点扩展) */
               if (ins->b >= 0) {
                   /* PRINT -1, const_idx : 打印常量池字符串 */
                   int ci = ins->b;
@@ -247,7 +463,14 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
                   }
               } else {
                   int64_t v = vm->regs[ins->a];
-                  if (v < 0) {
+                  if (ffmt) {
+                      /* 浮点打印: 寄存器 64 位值 = double 位模式, %g 对齐解释器 */
+                      double d; memcpy(&d, &v, 8);
+                      char buf[64]; snprintf(buf, sizeof(buf), "%g", d); kvm_add_output_ex(vm, buf, append);
+                  } else if (raw) {
+                      /* raw 裸整数打印: 允许负值 (imm bit1) */
+                      char buf[64]; snprintf(buf, sizeof(buf), "%lld", (long long)v); kvm_add_output_ex(vm, buf, append);
+                  } else if (v < 0) {
                       /* R_TMP < 0 = 常量索引标记 (值 -(ci+1)) */
                       int ci = (int)(-v - 1);
                       if (ci < (int)prog->const_count && prog->consts[ci].type == 1 && prog->consts[ci].sv) {
@@ -265,10 +488,16 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             break;
         case OP_HALT:
             vm->halted = 1; break;
-        /* ---- 硬件直访指令 ---- */
+        /* ---- 硬件直访指令 ----
+         * ⚠️ 陷阱修复(2026-08-27): 枚举缓冲必须 malloc 不能放栈!
+         *    devbuf[65536] 在栈上 → GCC 给整个 kvm_run 分配超大栈帧
+         *    (反汇编: lui t0,0xfff00; add sp,sp,t0 = sp-=1MB) → 在栈小的
+         *    嵌入式平台(ESP32-C6 3584B) sp 直接掉出 RAM → 硬栈保护异常
+         *    静默卡死(宿主 x86 栈 8MB 从未暴露)。统一 heap 后栈帧回归正常。 */
         case OP_HW_PCI_ENUM: {
-            char devbuf[65536];
-            int n = hw_pci_enumerate(devbuf, sizeof(devbuf));
+            char* devbuf = (char*)malloc(65536);
+            if (!devbuf) break;
+            int n = hw_pci_enumerate(devbuf, 65536);
             if (n > 0) {
                 /* 按行分割输出 */
                 char* line = strtok(devbuf, "\n");
@@ -277,11 +506,13 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
                     line = strtok(NULL, "\n");
                 }
             }
+            free(devbuf);
             break;
         }
         case OP_HW_USB_ENUM: {
-            char devbuf[65536];
-            int n = hw_usb_enumerate(devbuf, sizeof(devbuf));
+            char* devbuf = (char*)malloc(65536);
+            if (!devbuf) break;
+            int n = hw_usb_enumerate(devbuf, 65536);
             if (n > 0) {
                 char* line = strtok(devbuf, "\n");
                 while (line) {
@@ -289,11 +520,13 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
                     line = strtok(NULL, "\n");
                 }
             }
+            free(devbuf);
             break;
         }
         case OP_HW_SERIAL_ENUM: {
-            char devbuf[65536];
-            int n = hw_serial_enumerate(devbuf, sizeof(devbuf));
+            char* devbuf = (char*)malloc(65536);
+            if (!devbuf) break;
+            int n = hw_serial_enumerate(devbuf, 65536);
             if (n > 0) {
                 char* line = strtok(devbuf, "\n");
                 while (line) {
@@ -301,6 +534,7 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
                     line = strtok(NULL, "\n");
                 }
             }
+            free(devbuf);
             break;
         }
         case OP_HW_CPU_INFO: {
@@ -382,9 +616,105 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             if (ins->b >= 0) vm->regs[ins->b] = (int64_t)free_bytes;
             break;
         }
+        /* ---- 嵌入式 Linux 内核核心 (阶段六) ---- */
+        case OP_LINUX_INIT: {
+            /* b=cfg_path_const_idx, a=dst_handle_reg */
+            int ci = ins->b;
+            if (ci >= 0 && ci < (int)prog->const_count &&
+                prog->consts[ci].type == 1 && prog->consts[ci].sv) {
+                LinuxVM *lv = linux_init(prog->consts[ci].sv);
+                vm->regs[ins->a] = lv ? (int64_t)(intptr_t)lv : -1;
+            } else {
+                vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_LINUX_EXEC: {
+            /* a=handle_reg, b=cmd_const_idx, imm=expect_const_idx(<0 不等待) */
+            LinuxVM *lv = (LinuxVM *)(intptr_t)vm->regs[ins->a];
+            int rc = -1;
+            if (lv && lv != (LinuxVM *)(intptr_t)-1) {
+                const char *cmd = "", *expect = NULL;
+                if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                    prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv)
+                    cmd = prog->consts[ins->b].sv;
+                if (ins->imm >= 0 && ins->imm < (int)prog->const_count &&
+                    prog->consts[ins->imm].type == 1 && prog->consts[ins->imm].sv)
+                    expect = prog->consts[ins->imm].sv;
+                rc = linux_exec(lv, cmd, expect, 30000);
+            }
+            vm->regs[ins->a] = rc;
+            break;
+        }
+        case OP_LINUX_READ: {
+            /* a=handle_reg, b=count_reg; 读走 guest 全部输出→data 段+追加到 KVM 输出 */
+            LinuxVM *lv = (LinuxVM *)(intptr_t)vm->regs[ins->a];
+            int count = 0;
+            if (lv && lv != (LinuxVM *)(intptr_t)-1 && linux_has_output(lv)) {
+                char* buf = (char*)malloc(1 << 20);
+                if (!buf) break;
+                int n = linux_read_output(lv, buf, 1 << 20);
+                if (n > 0) {
+                    uint32_t addr = kprog_alloc_data((KillsProgram *)prog, (uint32_t)n + 1);
+                    memcpy(prog->data + addr, buf, (size_t)n + 1);
+                    vm->regs[ins->a] = (int64_t)addr;
+                    /* guest 输出按行追加到 KVM 输出 */
+                    char *cpy = strdup(buf);
+                    for (char *line = strtok(cpy, "\n"); line; line = strtok(NULL, "\n")) {
+                        kvm_add_output(vm, line);
+                        count++;
+                    }
+                    free(cpy);
+                }
+                free(buf);
+            }
+            if (ins->b >= 0) vm->regs[ins->b] = count;
+            break;
+        }
+        case OP_LINUX_END: {
+            LinuxVM *lv = (LinuxVM *)(intptr_t)vm->regs[ins->a];
+            if (lv && lv != (LinuxVM *)(intptr_t)-1) linux_end(lv);
+            vm->regs[ins->a] = 0;
+            break;
+        }
+        case OP_HW_SIG_RD:
+            /* OEM 设备签名读: dst = 熔丝签名寄存器 R127 (只读透传) */
+            if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)vm->sig_fuse;
+            break;
+        case OP_HW_DEV_CALL: {
+            /* hw_dev 命令分发 (2026-09-07): dst = hw_dev_dispatch(命令串)
+             * b = 命令串常量索引 (同 LINUX_* 的传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_dev("fmt", 数值) 的编译产物; 旧 .kbc imm=0 不追加);
+             * rc: 0x00=命中执行 / 0xFF(255)=未找到命令; arg 传 vm 供 handler 联动内核。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char devbuf[512];
+                    snprintf(devbuf, sizeof(devbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_dev_dispatch(devbuf, vm);
+                } else {
+                    rc = hw_dev_dispatch(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = 0xFF;
+            }
+            break;
+        }
         default:
             snprintf(vm->error_msg, sizeof(vm->error_msg), "unknown opcode %u at pc %u", ins->op, vm->pc);
             vm->error_count = 1; return 1;
+        }
+        /* ---- OEM 签名寄存器写屏蔽 (硬件 RO 语义) ----
+         * 任何指令若在本步越权写入 R127, 此处立即回滚为熔丝值并计数。
+         * 程序视角: R127 永远是设备标志, 写不进去。 */
+        if (vm->regs[KVM_REG_SIG] != (int64_t)vm->sig_fuse) {
+            vm->sig_violations++;
+            vm->regs[KVM_REG_SIG] = (int64_t)vm->sig_fuse;
         }
         vm->pc = next_pc;
     }
@@ -417,6 +747,14 @@ static const char* kvm_opname(uint8_t op) {
     case OP_HW_UART_RD: return "HW_UART_RD";
     case OP_HW_UART_WR: return "HW_UART_WR";
     case OP_HW_SYS_INFO: return "HW_SYS_INFO";
+    case OP_LINUX_INIT: return "LINUX_INIT";
+    case OP_LINUX_EXEC: return "LINUX_EXEC";
+    case OP_LINUX_READ: return "LINUX_READ";
+    case OP_LINUX_END: return "LINUX_END";
+    case OP_HW_SIG_RD: return "HW_SIG_RD";
+    case OP_HW_DEV_CALL: return "HW_DEV_CALL";
+    case OP_FADD: return "FADD"; case OP_FSUB: return "FSUB"; case OP_FMUL: return "FMUL";
+    case OP_FDIV: return "FDIV"; case OP_F2I: return "F2I"; case OP_I2F: return "I2F";
     default: return "?";
     }
 }

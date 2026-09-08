@@ -13,6 +13,7 @@
 #include "vm.h"
 #include "tensor.h"
 #include "weights.h"
+#include "nd_tensor.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -34,7 +35,10 @@ static MoValue val_array_empty(void) { MoValue x; memset(&x,0,sizeof(x)); x.type
 
 static void value_free(MoValue* v) {
     if (!v) return;
-    if (v->type == VAL_ARRAY && v->arr) {
+    if (v->type == VAL_TENSOR && v->tensor) {
+        nd_free((NdTensor*)v->tensor);
+        v->tensor = NULL;
+    } else if (v->type == VAL_ARRAY && v->arr) {
         for (int i = 0; i < v->arr->count; i++) value_free(&v->arr->items[i]);
         if (v->arr->items) free(v->arr->items);
         free(v->arr);
@@ -67,6 +71,13 @@ static MoValue value_clone(const MoValue* v) {
     case VAL_FLOAT: r = val_float(v->fval); break;
     case VAL_BOOL: r = val_bool(v->ival); break;
     case VAL_STR: r = val_str(v->sval); break;
+    case VAL_TENSOR: {
+        if (v->tensor) {
+            r.type = VAL_TENSOR;
+            r.tensor = nd_clone((const NdTensor*)v->tensor);
+        } else { r = val_null(); }
+        break;
+    }
     case VAL_ARRAY: {
         r = val_array_empty();
         for (int i = 0; i < v->arr->count; i++) {
@@ -80,6 +91,20 @@ static MoValue value_clone(const MoValue* v) {
     return r;
 }
 
+/* 递归打印 tensor 完整数据 (row-major, 与 VAL_ARRAY 打印格式一致) */
+static void nd_to_str_rec(const NdTensor* t, int dim, long base, char* buf, size_t buflen, size_t* offp) {
+    if (dim == t->ndim) {
+        *offp += snprintf(buf+*offp, buflen-*offp, "%g", t->data[base]);
+        return;
+    }
+    *offp += snprintf(buf+*offp, buflen-*offp, "[");
+    for (int i = 0; i < t->shape[dim]; i++) {
+        if (i > 0) *offp += snprintf(buf+*offp, buflen-*offp, ", ");
+        nd_to_str_rec(t, dim+1, base * t->shape[dim] + i, buf, buflen, offp);
+    }
+    *offp += snprintf(buf+*offp, buflen-*offp, "]");
+}
+
 void mo_value_to_str(const MoValue* v, char* buf, int buflen) {
     if (!v || buflen <= 0) { if (buf && buflen>0) buf[0]='\0'; return; }
     switch (v->type) {
@@ -87,11 +112,30 @@ void mo_value_to_str(const MoValue* v, char* buf, int buflen) {
     case VAL_FLOAT: snprintf(buf, buflen, "%g", v->fval); break;
     case VAL_BOOL: snprintf(buf, buflen, "%s", v->ival ? "true" : "false"); break;
     case VAL_STR: snprintf(buf, buflen, "%s", v->sval ? v->sval : ""); break;
+    case VAL_TENSOR: {
+        NdTensor* t = (NdTensor*)v->tensor;
+        if (!t) { snprintf(buf, buflen, "<null tensor>"); break; }
+        if (t->ndim == 0 && t->data) {
+            snprintf(buf, buflen, "%g", t->data[0]);
+            break;
+        }
+        if (t->size > 0 && t->size <= 1024) {
+            size_t offp = 0;
+            nd_to_str_rec(t, 0, 0, buf, (size_t)buflen, &offp);
+            break;
+        }
+        int off = snprintf(buf, buflen, "<tensor %d-dim [", t->ndim);
+        for (int i = 0; i < t->ndim && off < buflen-1; i++) {
+            off += snprintf(buf+off, buflen-off, "%s%d", i?",":"", t->shape[i]);
+        }
+        snprintf(buf+off, buflen-off, "]>");
+        break;
+    }
     case VAL_ARRAY: {
         int off = 0;
         off = snprintf(buf+off, buflen-off, "[");
         for (int i = 0; i < v->arr->count && off < buflen-1; i++) {
-            char tmp[128];
+            char tmp[8192];
             mo_value_to_str(&v->arr->items[i], tmp, sizeof(tmp));
             if (i > 0) off += snprintf(buf+off, buflen-off, ", ");
             off += snprintf(buf+off, buflen-off, "%s", tmp);
@@ -424,14 +468,17 @@ static MoValue eval_index_access(VM* vm, const AstNode* node) {
 }
 
 /* 尝试作为原生张量算子调用。识别则返回结果(非 NULL); 否则返回 VAL_NULL。 */
+/* 前向声明 (ND tensor 辅助) */
+static NdTensor* __nd_get_arg(const MoValue* v);
+
 static MoValue try_tensor_call(VM* vm, const char* name, const NodeList* args) {
     /* 需要至少 1 个参数的算子 */
     if (args->count < 1) return val_null();
     /* 求值所有参数 */
     int n = args->count;
-    MoValue av[8];
+    MoValue av[16];
     memset(av, 0, sizeof(av));
-    for (int i = 0; i < n && i < 8; i++) av[i] = eval_expr(vm, args->items[i]);
+    for (int i = 0; i < n && i < 16; i++) av[i] = eval_expr(vm, args->items[i]);
     MoValue r = val_null();
 
     if (strcmp(name, "matmul") == 0 && n >= 2) {
@@ -485,9 +532,266 @@ static MoValue try_tensor_call(VM* vm, const char* name, const NodeList* args) {
         }
     }
 
+    /* ---- ND Tensor 算子 ---- */
+    /* 从 MoValue 提取 NdTensor (兼容 VAL_TENSOR 和 VAL_ARRAY) */
+    /* 注意: 返回的指针指向临时转换结果，调用方需在算子完成后释放 */
+    #define ND_GET(idx) __nd_get_arg(&av[idx])
+    /* (在后面定义) */
+
+    /* 检测是否所有参数都是 VAL_ARRAY/VAL_TENSOR */
+    if (r.type == VAL_NULL) {
+        /* nd_create(shape..., ndim, data?) — 创建 ND 张量 */
+        if (strcmp(name, "nd_create") == 0 || strcmp(name, "tensor") == 0) {
+            if (n >= 1 && av[0].type == VAL_ARRAY && av[0].arr) {
+                /* 从 VAL_ARRAY 嵌套数组转 ND tensor */
+                NdTensor* t = nd_from_movalue(&av[0]);
+                if (t) { r.type = VAL_TENSOR; r.tensor = t; }
+            }
+        } else if (strcmp(name, "nd_zeros") == 0 && n >= 1 && av[0].type == VAL_ARRAY) {
+            /* nd_zeros([d0,d1,...]) */
+            MoArray* shape_arr = av[0].arr;
+            int* shape = (int*)malloc(sizeof(int) * (size_t)shape_arr->count);
+            for (int i = 0; i < shape_arr->count; i++)
+                shape[i] = (int)shape_arr->items[i].ival;
+            NdTensor* t = nd_zeros(shape, shape_arr->count);
+            free(shape);
+            if (t) { r.type = VAL_TENSOR; r.tensor = t; }
+        } else if ((strcmp(name, "nd_sphere_field") == 0 || strcmp(name, "sphere_field") == 0) && n >= 6) {
+            int D = (int)av[0].ival, H = (int)av[1].ival, W = (int)av[2].ival;
+            double radius = av[3].type == VAL_FLOAT ? av[3].fval : (double)av[3].ival;
+            double cx    = av[4].type == VAL_FLOAT ? av[4].fval : (double)av[4].ival;
+            double cy    = av[5].type == VAL_FLOAT ? av[5].fval : (double)av[5].ival;
+            double cz    = n > 6 ? (av[6].type == VAL_FLOAT ? av[6].fval : (double)av[6].ival) : 0;
+            NdTensor* t = nd_sphere_field(D, H, W, radius, cx, cy, cz);
+            if (t) { r.type = VAL_TENSOR; r.tensor = t; }
+        } else if ((strcmp(name, "nd_ellipsoid_field") == 0 || strcmp(name, "ellipsoid_field") == 0) && n >= 6) {
+            int D = (int)av[0].ival, H = (int)av[1].ival, W = (int)av[2].ival;
+            double rx = av[3].type == VAL_FLOAT ? av[3].fval : (double)av[3].ival;
+            double ry = av[4].type == VAL_FLOAT ? av[4].fval : (double)av[4].ival;
+            double rz = av[5].type == VAL_FLOAT ? av[5].fval : (double)av[5].ival;
+            double cx = n > 6 ? (av[6].type == VAL_FLOAT ? av[6].fval : (double)av[6].ival) : 0;
+            double cy = n > 7 ? (av[7].type == VAL_FLOAT ? av[7].fval : (double)av[7].ival) : 0;
+            double cz = n > 8 ? (av[8].type == VAL_FLOAT ? av[8].fval : (double)av[8].ival) : 0;
+            NdTensor* t = nd_ellipsoid_field(D, H, W, rx, ry, rz, cx, cy, cz);
+            if (t) { r.type = VAL_TENSOR; r.tensor = t; }
+        } else if ((strcmp(name, "nd_reshape") == 0 || strcmp(name, "reshape") == 0) && n >= 2) {
+            NdTensor* t = ND_GET(0);
+            MoArray* shape_arr = av[1].arr;
+            int* shape = (int*)malloc(sizeof(int) * (size_t)shape_arr->count);
+            for (int i = 0; i < shape_arr->count; i++) shape[i] = (int)shape_arr->items[i].ival;
+            NdTensor* r2 = t ? nd_reshape(t, shape, shape_arr->count) : NULL;
+            free(shape);
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_transpose") == 0 || strcmp(name, "transpose_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_transpose(t, NULL) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_add") == 0 || strcmp(name, "add_n") == 0) && n >= 2) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            NdTensor* r2 = (a && b) ? nd_add(a, b) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_sub") == 0 || strcmp(name, "sub_n") == 0) && n >= 2) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            NdTensor* r2 = (a && b) ? nd_sub(a, b) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_mul") == 0 || strcmp(name, "mul_n") == 0) && n >= 2) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            NdTensor* r2 = (a && b) ? nd_mul(a, b) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_div") == 0 || strcmp(name, "div_n") == 0) && n >= 2) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            NdTensor* r2 = (a && b) ? nd_div(a, b) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_relu") == 0 || strcmp(name, "relu_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_relu(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_tanh") == 0 || strcmp(name, "tanh_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_tanh(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_sigmoid") == 0 || strcmp(name, "sigmoid_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_sigmoid(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_exp") == 0 || strcmp(name, "exp_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_exp(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_log") == 0 || strcmp(name, "log_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_log(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_abs") == 0 || strcmp(name, "abs_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_abs(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_sqrt") == 0 || strcmp(name, "sqrt_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_sqrt(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_sum") == 0 || strcmp(name, "sum_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            int axis = (n >= 2) ? (int)av[1].ival : -1;
+            NdTensor* r2 = t ? nd_sum(t, axis) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_mean") == 0 || strcmp(name, "mean_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            int axis = (n >= 2) ? (int)av[1].ival : -1;
+            NdTensor* r2 = t ? nd_mean(t, axis) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_min") == 0 || strcmp(name, "min_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            int axis = (n >= 2) ? (int)av[1].ival : -1;
+            NdTensor* r2 = t ? nd_min(t, axis) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_max") == 0 || strcmp(name, "max_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            int axis = (n >= 2) ? (int)av[1].ival : -1;
+            NdTensor* r2 = t ? nd_max(t, axis) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_softmax") == 0 || strcmp(name, "softmax_n") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            int axis = (n >= 2) ? (int)av[1].ival : -1;
+            NdTensor* r2 = t ? nd_softmax(t, axis) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_matmul") == 0 || strcmp(name, "matmul_n") == 0) && n >= 2) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            NdTensor* r2 = (a && b) ? nd_matmul(a, b) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_conv2d") == 0 || strcmp(name, "conv2d") == 0) && n >= 5) {
+            NdTensor *input = ND_GET(0), *kernel = ND_GET(1);
+            int ph = (int)av[2].ival, pw = (int)av[3].ival;
+            int sh = (int)av[4].ival, sw = (n >= 6) ? (int)av[5].ival : sh;
+            NdTensor* r2 = (input && kernel) ? nd_conv2d(input, kernel, ph, pw, sh, sw) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_maxpool2d") == 0 || strcmp(name, "maxpool2d") == 0) && n >= 5) {
+            NdTensor* input = ND_GET(0);
+            int kh = (int)av[1].ival, kw = (int)av[2].ival;
+            int ph = (int)av[3].ival, pw = (int)av[4].ival;
+            int sh = (n >= 6) ? (int)av[5].ival : kh;
+            int sw = (n >= 7) ? (int)av[6].ival : kw;
+            NdTensor* r2 = input ? nd_maxpool2d(input, kh, kw, ph, pw, sh, sw) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_rgb2hsv") == 0 || strcmp(name, "rgb2hsv") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_rgb2hsv(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_hsv2rgb") == 0 || strcmp(name, "hsv2rgb") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_hsv2rgb(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_grayscale") == 0 || strcmp(name, "grayscale") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_grayscale(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_slice") == 0 || strcmp(name, "slice_n") == 0) && n >= 4) {
+            NdTensor* t = ND_GET(0);
+            MoArray* starts_a = av[1].arr;
+            MoArray* ends_a = av[2].arr;
+            MoArray* steps_a = av[3].arr;
+            if (t && starts_a && ends_a) {
+                int* starts = (int*)malloc(sizeof(int) * (size_t)starts_a->count);
+                int* ends = (int*)malloc(sizeof(int) * (size_t)ends_a->count);
+                int* steps = steps_a ? (int*)malloc(sizeof(int) * (size_t)steps_a->count) : NULL;
+                for (int i = 0; i < starts_a->count; i++) starts[i] = (int)starts_a->items[i].ival;
+                for (int i = 0; i < ends_a->count; i++) ends[i] = (int)ends_a->items[i].ival;
+                if (steps_a) for (int i = 0; i < steps_a->count; i++) steps[i] = (int)steps_a->items[i].ival;
+                NdTensor* r2 = nd_slice(t, starts, ends, steps);
+                free(starts); free(ends); free(steps);
+                if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+            }
+        } else if ((strcmp(name, "nd_to_array") == 0 || strcmp(name, "tensor_to_array") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            if (t) r = nd_to_movalue(t);
+        } else if (strcmp(name, "nd_pad") == 0 && n >= 4) {
+            NdTensor* t = ND_GET(0);
+            int axis = (int)av[1].ival, before = (int)av[2].ival, after = (int)av[3].ival;
+            NdTensor* r2 = t ? nd_pad(t, axis, before, after) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_concat") == 0 || strcmp(name, "concat_n") == 0) && n >= 3) {
+            NdTensor *a = ND_GET(0), *b = ND_GET(1);
+            int axis = (int)av[2].ival;
+            if (a && b) {
+                const NdTensor* arr[2] = {a, b};
+                NdTensor* r2 = nd_concat(arr, 2, axis);
+                if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+            }
+        } else if ((strcmp(name, "nd_upsample_nearest") == 0 || strcmp(name, "upsample_n") == 0) && n >= 3) {
+            NdTensor* t = ND_GET(0);
+            int sh = (int)av[1].ival, sw = (int)av[2].ival;
+            NdTensor* r2 = t ? nd_upsample_nearest(t, sh, sw) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_gradient3d") == 0 || strcmp(name, "gradient3d") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            NdTensor* r2 = t ? nd_gradient3d(t) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_marching_cubes") == 0 || strcmp(name, "marching_cubes") == 0) && n >= 2) {
+            NdTensor* t = ND_GET(0);
+            double iso = av[1].type == VAL_FLOAT ? av[1].fval : (double)av[1].ival;
+            NdTensor* r2 = t ? nd_marching_cubes(t, iso) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_rasterize_tri") == 0 || strcmp(name, "rasterize_tri") == 0) && n >= 4) {
+            NdTensor* verts = ND_GET(0);
+            NdTensor* tris = NULL;
+            if (av[1].type == VAL_TENSOR) tris = (NdTensor*)av[1].tensor;
+            int w = (int)av[2].ival;
+            int h = (int)av[3].ival;
+            NdTensor* r2 = verts ? nd_rasterize_triangles(verts, tris, w, h) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "nd_rasterize_wireframe") == 0 || strcmp(name, "rasterize_wire") == 0) && n >= 4) {
+            NdTensor* verts = ND_GET(0);
+            NdTensor* tris = NULL;
+            if (av[1].type == VAL_TENSOR) tris = (NdTensor*)av[1].tensor;
+            int w = (int)av[2].ival;
+            int h = (int)av[3].ival;
+            NdTensor* r2 = verts ? nd_rasterize_wireframe(verts, tris, w, h) : NULL;
+            if (r2) { r.type = VAL_TENSOR; r.tensor = r2; }
+        } else if ((strcmp(name, "render_raytrace") == 0 || strcmp(name, "raytrace") == 0) && n >= 14) {
+            int W = (int)av[0].ival, H = (int)av[1].ival;
+            double cx = av[2].type == VAL_FLOAT ? av[2].fval : (double)av[2].ival;
+            double cy = av[3].type == VAL_FLOAT ? av[3].fval : (double)av[3].ival;
+            double cz = av[4].type == VAL_FLOAT ? av[4].fval : (double)av[4].ival;
+            double sphere_r = av[5].type == VAL_FLOAT ? av[5].fval : (double)av[5].ival;
+            double cam_x = av[6].type == VAL_FLOAT ? av[6].fval : (double)av[6].ival;
+            double cam_y = av[7].type == VAL_FLOAT ? av[7].fval : (double)av[7].ival;
+            double cam_z = av[8].type == VAL_FLOAT ? av[8].fval : (double)av[8].ival;
+            double light_x = av[9].type == VAL_FLOAT ? av[9].fval : (double)av[9].ival;
+            double light_y = av[10].type == VAL_FLOAT ? av[10].fval : (double)av[10].ival;
+            double light_z = av[11].type == VAL_FLOAT ? av[11].fval : (double)av[11].ival;
+            double ambient = av[12].type == VAL_FLOAT ? av[12].fval : (double)av[12].ival;
+            double diffuse_k = av[13].type == VAL_FLOAT ? av[13].fval : (double)av[13].ival;
+            NdTensor* img = nd_render_raytrace(W, H, cx, cy, cz, sphere_r,
+                                                cam_x, cam_y, cam_z,
+                                                light_x, light_y, light_z,
+                                                ambient, diffuse_k);
+            if (img) { r.type = VAL_TENSOR; r.tensor = img; }
+        } else if ((strcmp(name, "nd_print") == 0 || strcmp(name, "nd_info") == 0) && n >= 1) {
+            NdTensor* t = ND_GET(0);
+            if (t) { nd_print_info(t, ""); }
+            r = val_int(0);
+        } else if ((strcmp(name, "nd_dim") == 0 || strcmp(name, "dim_n") == 0) && n >= 2) {
+            NdTensor* t = ND_GET(0);
+            int axis = (int)av[1].ival;
+            int d = t ? nd_dim(t, axis) : 0;
+            r = val_int((long)d);
+        }
+    }
+
     /* 释放临时参数 (算子已克隆/复制所需数据) */
-    for (int i = 0; i < n && i < 8; i++) value_free(&av[i]);
+    for (int i = 0; i < n && i < 16; i++) value_free(&av[i]);
     return r;
+}
+#undef ND_GET
+
+/* 辅助宏: 从 MoValue 提取 NdTensor* (兼容 VAL_TENSOR/VAL_ARRAY/VAL_FLOAT/VAL_INT) */
+static NdTensor* __nd_get_arg(const MoValue* v) {
+    if (!v) return NULL;
+    if (v->type == VAL_TENSOR) return (NdTensor*)v->tensor;
+    if (v->type == VAL_ARRAY) return nd_from_movalue(v);
+    if (v->type == VAL_FLOAT) return nd_scalar(v->fval);
+    if (v->type == VAL_INT) return nd_scalar((double)v->ival);
+    return NULL;
 }
 
 static MoValue eval_expr(VM* vm, const AstNode* node) {
@@ -536,13 +840,15 @@ static MoValue eval_expr(VM* vm, const AstNode* node) {
         if (!fn) {
             /* 内置 print */
             if (node->text && strcmp(node->text, "print") == 0) {
-                char buf[256];
+                size_t bsz = 8 * 1024 * 1024 + 64;
+                char* buf = (char*)malloc(bsz);
                 for (int i = 0; i < node->args.count; i++) {
                     MoValue v = eval_expr(vm, node->args.items[i]);
-                    mo_value_to_str(&v, buf, sizeof(buf));
+                    mo_value_to_str(&v, buf, bsz);
                     vm_add_output(vm, buf);
                     value_free(&v);
                 }
+                free(buf);
                 return val_null();
             }
             /* 原生张量算子 (模型推理内核) */
@@ -630,13 +936,23 @@ static void exec_stmt(VM* vm, const AstNode* node) {
     case NODE_VAR_DECL: {
         MoValue v = val_null();
         if (node->left) v = eval_expr(vm, node->left);
-        if (node->mtype == TYPE_STR && v.type != VAL_STR) {
+        if (node->mtype == TYPE_STR && v.type != VAL_STR && v.type != VAL_ARRAY) {
             char buf[64]; mo_value_to_str(&v, buf, sizeof(buf));
             value_free(&v);
             v = val_str(buf);
         }
-        /* 声明到当前(最内层)作用域 */
-        var_table_set(&vm->scopes[vm->scope_count-1], node->text, v, node->mtype);
+        /* 重声明语义 = "确保存在 + 赋值": 先沿作用域链找已有定义,
+         * 命中(含全局/外层, 函数内重声明全局)则原地更新 —— 与编译器
+         * declare_var 复用全局寄存器语义一致 (probe4/probe3);
+         * 未命中才在最内层作用域新声明。 */
+        VarSlot* existing = scope_lookup(vm, node->text);
+        if (existing) {
+            value_free(&existing->value);
+            existing->value = v;
+            existing->mtype = node->mtype;
+        } else {
+            var_table_set(&vm->scopes[vm->scope_count-1], node->text, v, node->mtype);
+        }
         break;
     }
     case NODE_CONST_DECL:
@@ -684,14 +1000,18 @@ static void exec_stmt(VM* vm, const AstNode* node) {
         break;
     }
     case NODE_PRINT: {
-        char buf[1024] = "";
+        size_t bsz = 8 * 1024 * 1024 + 64;
+        char* buf = (char*)malloc(bsz);
+        buf[0] = '\0'; size_t off = 0;
         for (int i = 0; i < node->args.count; i++) {
             MoValue v = eval_expr(vm, node->args.items[i]);
-            char tmp[256]; mo_value_to_str(&v, tmp, sizeof(tmp));
-            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            size_t cap = bsz - off;
+            if (cap > 16) mo_value_to_str(&v, buf + off, (int)cap);
+            off = strlen(buf);
             value_free(&v);
         }
         vm_add_output(vm, buf);
+        free(buf);
         break;
     }
     case NODE_IF: {

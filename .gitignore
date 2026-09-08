@@ -8,3 +8,24 @@ xiaomo
 
 # 临时
 *.tmp
+
+# 本地凭据（绝不上传）
+cluster/sshx_secrets.py
+
+# 日志与临时产物
+*.log
+cluster/dl/
+__pycache__/
+*.pyc
+
+# 构建目录与 binary 产物
+build/
+build-xiaomo/
+*.dSYM
+*.tar.gz
+
+# 实验/抽帧中间体
+gen_tmp/
+vframes*/
+*.npy
+*.npz

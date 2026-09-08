@@ -1,244 +1,62 @@
-epoch 
-0
-  loss = 
-0.267974
-epoch 
-1
-  loss = 
-0.165386
-epoch 
-2
-  loss = 
-0.0995984
-epoch 
-3
-  loss = 
-0.0638567
-epoch 
-4
-  loss = 
-0.0445243
-epoch 
-5
-  loss = 
-0.0332352
-epoch 
-6
-  loss = 
-0.0260905
-epoch 
-7
-  loss = 
-0.0212587
-epoch 
-8
-  loss = 
-0.0178157
-epoch 
-9
-  loss = 
-0.015259
-epoch 
-10
-  loss = 
-0.0132968
-epoch 
-11
-  loss = 
-0.01175
-epoch 
-12
-  loss = 
-0.0105033
-epoch 
-13
-  loss = 
-0.00947974
-epoch 
-14
-  loss = 
-0.00862604
-epoch 
-15
-  loss = 
-0.00790436
-epoch 
-16
-  loss = 
-0.00728713
-epoch 
-17
-  loss = 
-0.0067538
-epoch 
-18
-  loss = 
-0.00628882
-epoch 
-19
-  loss = 
-0.00588018
-epoch 
-20
-  loss = 
-0.00551849
-epoch 
-21
-  loss = 
-0.0051963
-epoch 
-22
-  loss = 
-0.00490764
-epoch 
-23
-  loss = 
-0.00464765
-epoch 
-24
-  loss = 
-0.00441238
-epoch 
-25
-  loss = 
-0.00419854
-epoch 
-26
-  loss = 
-0.00400341
-epoch 
-27
-  loss = 
-0.00382468
-epoch 
-28
-  loss = 
-0.00366042
-epoch 
-29
-  loss = 
-0.00350898
-epoch 
-30
-  loss = 
-0.00336895
-epoch 
-31
-  loss = 
-0.00323911
-epoch 
-32
-  loss = 
-0.00311843
-epoch 
-33
-  loss = 
-0.00300597
-epoch 
-34
-  loss = 
-0.00290096
-epoch 
-35
-  loss = 
-0.00280268
-epoch 
-36
-  loss = 
-0.00271053
-epoch 
-37
-  loss = 
-0.00262396
-epoch 
-38
-  loss = 
-0.00254249
-epoch 
-39
-  loss = 
-0.00246569
-epoch 
-40
-  loss = 
-0.00239318
-epoch 
-41
-  loss = 
-0.00232462
-epoch 
-42
-  loss = 
-0.0022597
-epoch 
-43
-  loss = 
-0.00219814
-epoch 
-44
-  loss = 
-0.00213969
-epoch 
-45
-  loss = 
-0.00208413
-epoch 
-46
-  loss = 
-0.00203126
-epoch 
-47
-  loss = 
-0.00198088
-epoch 
-48
-  loss = 
-0.00193283
-epoch 
-49
-  loss = 
-0.00188696
-epoch 
-50
-  loss = 
-0.00184312
-epoch 
-51
-  loss = 
-0.00180118
-epoch 
-52
-  loss = 
-0.00176102
-epoch 
-53
-  loss = 
-0.00172254
-epoch 
-54
-  loss = 
-0.00168563
-epoch 
-55
-  loss = 
-0.0016502
-epoch 
-56
-  loss = 
-0.00161617
-epoch 
-57
-  loss = 
-0.00158346
-epoch 
-58
-  loss = 
-0.00155198
-epoch 
-59
-  loss = 
-0.00152169
-预测 [0.8,0.2] (应归类0) -> 
-[[0.988244, 0.0117562]]
-预测 [0.2,0.8] (应归类1) -> 
-[[0.0116441, 0.988356]]
+epoch 0  loss = 0.267974
+epoch 1  loss = 0.165386
+epoch 2  loss = 0.0995984
+epoch 3  loss = 0.0638567
+epoch 4  loss = 0.0445243
+epoch 5  loss = 0.0332352
+epoch 6  loss = 0.0260905
+epoch 7  loss = 0.0212587
+epoch 8  loss = 0.0178157
+epoch 9  loss = 0.015259
+epoch 10  loss = 0.0132968
+epoch 11  loss = 0.01175
+epoch 12  loss = 0.0105033
+epoch 13  loss = 0.00947974
+epoch 14  loss = 0.00862604
+epoch 15  loss = 0.00790436
+epoch 16  loss = 0.00728713
+epoch 17  loss = 0.0067538
+epoch 18  loss = 0.00628882
+epoch 19  loss = 0.00588018
+epoch 20  loss = 0.00551849
+epoch 21  loss = 0.0051963
+epoch 22  loss = 0.00490764
+epoch 23  loss = 0.00464765
+epoch 24  loss = 0.00441238
+epoch 25  loss = 0.00419854
+epoch 26  loss = 0.00400341
+epoch 27  loss = 0.00382468
+epoch 28  loss = 0.00366042
+epoch 29  loss = 0.00350898
+epoch 30  loss = 0.00336895
+epoch 31  loss = 0.00323911
+epoch 32  loss = 0.00311843
+epoch 33  loss = 0.00300597
+epoch 34  loss = 0.00290096
+epoch 35  loss = 0.00280268
+epoch 36  loss = 0.00271053
+epoch 37  loss = 0.00262396
+epoch 38  loss = 0.00254249
+epoch 39  loss = 0.00246569
+epoch 40  loss = 0.00239318
+epoch 41  loss = 0.00232462
+epoch 42  loss = 0.0022597
+epoch 43  loss = 0.00219814
+epoch 44  loss = 0.00213969
+epoch 45  loss = 0.00208413
+epoch 46  loss = 0.00203126
+epoch 47  loss = 0.00198088
+epoch 48  loss = 0.00193283
+epoch 49  loss = 0.00188696
+epoch 50  loss = 0.00184312
+epoch 51  loss = 0.00180118
+epoch 52  loss = 0.00176102
+epoch 53  loss = 0.00172254
+epoch 54  loss = 0.00168563
+epoch 55  loss = 0.0016502
+epoch 56  loss = 0.00161617
+epoch 57  loss = 0.00158346
+epoch 58  loss = 0.00155198
+epoch 59  loss = 0.00152169
+预测 [0.8,0.2] (应归类0) -> [[0.988244, 0.0117562]]
+预测 [0.2,0.8] (应归类1) -> [[0.0116441, 0.988356]]
