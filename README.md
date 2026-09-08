@@ -1124,9 +1124,4 @@ POST /api/vm/reset                VM复位              GET  /api/shell/history 
 
 ---
 
-## 📎 文档覆盖度声明
-
-- **16 个 .c + 16 个 .h 全部覆盖**，每个文件的每个导出函数（及关键 static）均有条目
-- 函数行号基于 2026-09-06 版源码（src 共 9283 行）
-- 「已知坑」均出自真实事故复盘（对应知识库 esp32-simulator-ide / esp32-sim-file-api-c-layer 页面）
 
