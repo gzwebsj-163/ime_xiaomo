@@ -9,7 +9,7 @@
  * 接线对照 (10-Pin TFT → LonganPi 3H GPIO):
  *   TFT VCC  → 3.3V (pin 1, 17)
  *   TFT GND  → GND  (pin 6, 9, 14, ...)
- *   TFT CS   → SPI1_CS1  (PH9)      /* 根据 DTS: cs1 */
+ *   TFT CS   → SPI1_CS1  (PH9)       (根据 DTS: cs1)
  *   TFT RST  → PG13
  *   TFT DC   → PG11
  *   TFT MOSI → SPI1_MOSI (PH7)

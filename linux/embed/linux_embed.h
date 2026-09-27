@@ -43,6 +43,9 @@ LinuxVM *linux_init(const char *cfg_path);
  */
 int linux_exec(LinuxVM *vm, const char *cmd, const char *expect, int timeout_ms);
 
+/* linux_settle — 继续泵 VM 直至输出静默（排水残留回显/结果）。 */
+void linux_settle(LinuxVM *vm, int quiet_ms);
+
 /*
  * linux_read_output — 取出 guest 的全部输出（读走即消费，缓冲被清空）。
  *   返回: 写入 buf 的字节数（不含 \0）

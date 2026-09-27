@@ -398,9 +398,35 @@ int linux_exec(LinuxVM *vm, const char *cmd, const char *expect, int timeout_ms)
     for (;;) {
         vm_pump(vm, 10);
         if (expect && ring_find(&vm->ec.out, expect))
-            return 0;  /* 出现预期输出 */
+            { linux_settle(vm, 300); return 0; }  /* 出现预期输出, 先排水再回 */
         if (now_ms() > deadline)
-            return expect ? 1 : 0;  /* 超时；无 expect 时视为完成 */
+            { linux_settle(vm, 300); return expect ? 1 : 0; }  /* 超时；无 expect 时视为完成 */
+    }
+}
+
+/* linux_settle — exec 收尾排水：继续泵至静默, 把残留在宿主管道里的
+ * 回显/结果收进输出 ring (追加, 不清空)。新输出会重开静默窗口,
+ * 硬上限 ~1.5s 防止 guest 疯狂刷屏时拖死调用方。 */
+void linux_settle(LinuxVM *vm, int quiet_ms)
+{
+    uint64_t start, hard;
+    int last;
+    if (!vm || !vm->m)
+        return;
+    if (quiet_ms <= 0)
+        quiet_ms = 300;
+    start = now_ms();
+    hard = start + (uint64_t)quiet_ms * 4 + 300;
+    last = vm->ec.out.count;
+    for (;;) {
+        vm_pump(vm, 10);
+        if (vm->ec.out.count != last) {
+            last = vm->ec.out.count;
+            start = now_ms();          /* 有新输出 → 静默窗口重开 */
+            continue;
+        }
+        if (now_ms() - start > (uint64_t)quiet_ms || now_ms() > hard)
+            return;
     }
 }
 
