@@ -18,6 +18,7 @@
 #include "hw_direct.h"
 #include "hw_oem.h"
 #include "hw_dev.h"
+#include "hw_fault.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -185,12 +186,76 @@ void kvm_io_pushf(const char* fmt, ...) {
 void kvm_io_set_pending(int v){ if (!v && g_io_count == 0) { } }  /* 兼容旧调用: 清空队列可选 */
 int  kvm_io_pending(void){ return g_io_count > 0; }
 const char* kvm_io_line(void){ return g_input_line; }
+/* kbc 自动推理 (FFI 7 feat) 特征缓存 — 声明在 kvm_io_pop 之前供其标脏 */
+#define INFER_DIM   64
+#define INFER_Q16   65536
+static uint64_t g_feats[INFER_DIM];
+static int      g_feats_dirty = 1;
 /* 弹出队首到 g_input_line (VM 消费); 空则返回 0 */
 static int kvm_io_pop(void) {
     if (g_io_count <= 0) return 0;
     snprintf(g_input_line, IO_Q_LEN, "%s", g_io_q[g_io_head]);
     g_io_head = (g_io_head + 1) % IO_Q_CAP; g_io_count--;
+    g_feats_dirty = 1;   /* 新行消费 → feat(i) 特征缓存失效 (kbc 自动推理) */
     return 1;
+}
+
+/* ============================================================
+ * 特征提取 (kbc 自动推理 FFI 7: feat(i))
+ * 与 examples/intent/train_intent.py 的 featurize 逐字节同款:
+ *   - ASCII 字母数字连续段 = 词单元 → hash("w:"+word)
+ *   - 连续 >=0x80 字节段(中文) → 逐字节滑窗 2-gram hash + 整段 unigram hash
+ *   - hash: h=5381; h = h*33 + byte (mod 2^64); 桶 = h % 64
+ *   - presence 特征: 值 ∈ {0, 65536} (Q16 的 1.0)
+ * 惰性计算: 每消费一行输入只提取一次, 64 次 feat(i) 复用缓存。
+ * ============================================================ */
+static uint64_t infer_hash_n(uint64_t h, const void* p, size_t n) {
+    const uint8_t* b = (const uint8_t*)p;
+    for (size_t i = 0; i < n; i++) h = h * 33 + b[i];
+    return h;
+}
+
+static void infer_featurize(const char* s) {
+    /* 双状态扫描: ASCII 词单元(小写化) / 多字节中文段(2-gram+unigram) */
+    size_t n = strlen(s);
+    memset(g_feats, 0, sizeof(g_feats));
+    char word[256]; size_t wn = 0;
+    uint8_t cjk[512]; size_t cn = 0;
+    size_t i = 0;
+    while (i < n) {
+        uint8_t c = (uint8_t)s[i];
+        if (c < 0x80) {
+            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+                if (c >= 'A' && c <= 'Z') c = (uint8_t)(c - 'A' + 'a');
+                if (wn < sizeof(word) - 1) word[wn++] = (char)c;
+                i++;
+            } else {
+                /* 分隔符: 冲刷词 + 中文段 */
+                if (wn) { uint64_t h = infer_hash_n(5381, "w:", 2); h = infer_hash_n(h, word, wn); g_feats[h % INFER_DIM] = INFER_Q16; wn = 0; }
+                for (size_t k = 0; cn >= 2 && k + 1 < cn; k++)
+                    g_feats[infer_hash_n(infer_hash_n(5381, &cjk[k], 1), &cjk[k+1], 1) % INFER_DIM] = INFER_Q16;
+                if (cn) g_feats[infer_hash_n(5381, cjk, cn) % INFER_DIM] = INFER_Q16;
+                cn = 0;
+                i++;
+            }
+        } else {
+            if (wn) { uint64_t h = infer_hash_n(5381, "w:", 2); h = infer_hash_n(h, word, wn); g_feats[h % INFER_DIM] = INFER_Q16; wn = 0; }
+            if (cn < sizeof(cjk)) cjk[cn++] = c;
+            i++;
+        }
+    }
+    if (wn) { uint64_t h = infer_hash_n(5381, "w:", 2); h = infer_hash_n(h, word, wn); g_feats[h % INFER_DIM] = INFER_Q16; }
+    for (size_t k = 0; cn >= 2 && k + 1 < cn; k++)
+        g_feats[infer_hash_n(infer_hash_n(5381, &cjk[k], 1), &cjk[k+1], 1) % INFER_DIM] = INFER_Q16;
+    if (cn) g_feats[infer_hash_n(5381, cjk, cn) % INFER_DIM] = INFER_Q16;
+    g_feats_dirty = 0;
+}
+
+/* 供宿主侧读取当前行特征 (调试/对拍; 未消费新行时返回 NULL) */
+const uint64_t* infer_feats_current(int* dim) {
+    if (g_feats_dirty) return NULL;
+    if (dim) *dim = INFER_DIM;
+    return g_feats;
 }
 
 /* 简单中文/英文关键词分类 → cid (供 .mo 路由):
@@ -264,7 +329,8 @@ static int llm_query_host(KillsVM* vm) {
     return 1;
 }
 
-static void kvm_ffi(KillsVM* vm, int idx, int result_reg) {
+static void kvm_ffi(KillsVM* vm, int idx, int result_reg, int64_t imm_arg) {
+    (void)imm_arg;  /* 仅 FFI 7 使用 */
     switch (idx) {
     case 0: { /* print_int from reg a */
         char buf[64]; snprintf(buf, sizeof(buf), "%lld", (long long)ffi_int_arg(vm, vm->regs[63] & 63));
@@ -307,6 +373,16 @@ static void kvm_ffi(KillsVM* vm, int idx, int result_reg) {
                   llm_gate.py 转发 SiliconFlow → 回复 append 到当前行 */
         int ok = llm_query_host(vm);
         vm->regs[result_reg] = ok ? 1 : 0;
+        break;
+    }
+    case 7: { /* feat(i) → 最近消费输入行的第 i 维特征 (Q16 presence, 0/65536)
+                  imm 编码: imm-1 = 实参所在寄存器 (与 hw_dev 双参同款约定)
+                  kbc 自动推理特征通道 (examples/intent/) */
+        int arg_reg = (int)imm_arg - 1;
+        long fi = (arg_reg >= 0 && arg_reg < 64) ? (long)vm->regs[arg_reg & 63] : 0;
+        if (g_feats_dirty) infer_featurize(g_input_line);
+        vm->regs[result_reg] = (fi >= 0 && fi < INFER_DIM)
+            ? (int64_t)g_feats[fi] : 0;
         break;
     }
     default: break;
@@ -356,6 +432,9 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
 
     /* hw_dev 命令表上电初始化: 清动态注册表 (旧表不跨运行残留) */
     hw_dev_init(NULL);
+
+    /* hw_fault 故障注入表/BSP 上电复位: 健康态起步 (旧注入不跨运行残留) */
+    hw_fault_init(NULL);
 
     /* 每帧保存: 返回 PC + 快照区寄存器 = 1+KILLS_SNAP_NREG 个 u64 */
     while (!vm->halted) {
@@ -484,7 +563,7 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
               }
               break; }
         case OP_FFI:
-            kvm_ffi(vm, ins->a, ins->b >= 0 ? ins->b : 0);
+            kvm_ffi(vm, ins->a, ins->b >= 0 ? ins->b : 0, ins->imm);
             break;
         case OP_HALT:
             vm->halted = 1; break;
@@ -705,6 +784,31 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             }
             break;
         }
+        case OP_HW_FAULT_CALL: {
+            /* TFT 模组故障诊断 (2026-09-24): dst = hw_fault_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_fault("fmt", 数值) 的编译产物);
+             * 返回: >=0 诊断结果 (scan=故障数/0 健康; pin N=故障码) / -1 未识别
+             *   (uint8 回绕 → 255); arg 传 vm 供未来真机联动内核。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char fltbuf[512];
+                    snprintf(fltbuf, sizeof(fltbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_fault_cmd(fltbuf, vm);
+                } else {
+                    rc = hw_fault_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
         default:
             snprintf(vm->error_msg, sizeof(vm->error_msg), "unknown opcode %u at pc %u", ins->op, vm->pc);
             vm->error_count = 1; return 1;
@@ -753,6 +857,7 @@ static const char* kvm_opname(uint8_t op) {
     case OP_LINUX_END: return "LINUX_END";
     case OP_HW_SIG_RD: return "HW_SIG_RD";
     case OP_HW_DEV_CALL: return "HW_DEV_CALL";
+    case OP_HW_FAULT_CALL: return "HW_FAULT_CALL";
     case OP_FADD: return "FADD"; case OP_FSUB: return "FSUB"; case OP_FMUL: return "FMUL";
     case OP_FDIV: return "FDIV"; case OP_F2I: return "F2I"; case OP_I2F: return "I2F";
     default: return "?";

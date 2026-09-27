@@ -65,8 +65,10 @@ for mo in examples/*.mo; do
     # 阻塞等输入, 非交互环境无法比对, 同样跳过。
     # hwdev_test 使用 hw_dev() 字节码内置 (OP_HW_DEV_CALL, 解释器
     # 不含该调用, 同 linux_* 先例), 由 C 组 hwdev 块独立覆盖。
+    # hwfault_test 使用 hw_fault() 字节码内置 (OP_HW_FAULT_CALL, 同先例),
+    # 由 C 组 hwfault 块独立覆盖。
     case "$name" in
-      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test)
+      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test|hwfault_test)
         echo "  [SKIP] mo2kbc $name (内核扩展专属: 张量算子/真Linux内核)"
         continue
         ;;
@@ -152,6 +154,58 @@ else
     red "  [FAIL] hwdev .mo→kbc"
     echo "$hwm_out" | sed 's/^/    /'
     FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdev mo2kbc")
+fi
+
+# ---- hw_fault TFT 模组故障诊断 (2026-09-24) ----
+fl_out=$("$BIN" hwfault 2>&1); fl_rc=$?
+if [ $fl_rc -eq 0 ] && echo "$fl_out" | grep -q "golden OK" \
+   && echo "$fl_out" | grep -q "scan=0 faults" \
+   && echo "$fl_out" | grep -q "inject P7=VDD_LOW -> scan = 1" \
+   && echo "$fl_out" | grep -q "inject P4=SPI_NOACK -> scan = 1" \
+   && echo "$fl_out" | grep -q "clear -> scan = 0"; then
+    green "  [PASS] hwfault (能力卡/黄金校验和/注入演示)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwfault (能力卡输出异常 rc=$fl_rc)"
+    echo "$fl_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwfault")
+fi
+
+# hwfault 自检 (黄金锁定/全类别注入/scan计数/命令分发)
+fls_out=$("$BIN" hwfault selftest 2>&1); fls_rc=$?
+if [ $fls_rc -eq 0 ] && echo "$fls_out" | grep -q "all PASS"; then
+    green "  [PASS] hwfault selftest (黄金锁定/全类别注入/scan计数/命令分发)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwfault selftest (rc=$fls_rc)"
+    echo "$fls_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwfault selftest")
+fi
+
+# hwfault 一次性: 健康 P7=NONE exit0 (注入 VDD_LOW 后 P7=0x02 exit1)
+flp_out=$("$BIN" hwfault pin 7 2>&1); flp_rc=$?
+if [ $flp_rc -eq 0 ] && echo "$flp_out" | grep -q "NONE"; then
+    green "  [PASS] hwfault pin (健康 P7=NONE exit0)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwfault pin (rc=$flp_rc)"
+    echo "$flp_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwfault pin")
+fi
+
+# hwfault .mo → kbc 端到端: hw_fault()内置 → OP_HW_FAULT_CALL → hw_fault_cmd
+# 双参 imm 编码: hw_fault("pin ", 7) → 拼接 "pin 7" → 2 (VDD_LOW);
+#   (拼接失败则 strtol 空串 → -1 回绕 255, rc=2 即 imm 动态拼接生效铁证)
+flm_out=$("$BIN" mo2kbc examples/hwfault_test.mo 2>&1)
+if echo "$flm_out" | grep -q "scan0 rc=0" && echo "$flm_out" | grep -q "inject rc=0" \
+   && echo "$flm_out" | grep -q "scan1 rc=1" && echo "$flm_out" | grep -q "pin7  rc=2" \
+   && echo "$flm_out" | grep -q "pin7v rc=2" && echo "$flm_out" | grep -q "scan2 rc=0"; then
+    green "  [PASS] hwfault .mo→kbc (hw_fault()内置+双参imm动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwfault .mo→kbc"
+    echo "$flm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwfault mo2kbc")
 fi
 
 echo ""

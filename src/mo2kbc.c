@@ -504,6 +504,16 @@ static void cg_expr(Cg* cg, AstNode* n) {
             emit(cg, OP_FFI, 5, R_TMP, 0);
             break;
         }
+        /* 内置: kbc 自动推理特征通道 (2026-09-13) — feat(i)
+         *   feat(i) → FFI 7, R_TMP = 第 i 维特征 (Q16 presence 0/65536)
+         *   语义: 最近一次消费的输入行 → 宿主提取 64 维哈希特征;
+         *   实参先求值进 R_TMP, 结果回 R_TMP; VM 侧 imm-1 = 实参寄存器。 */
+        if (n->text && strcmp(n->text, "feat") == 0) {
+            if (n->args.count < 1) { fail(cg); break; }
+            cg_expr(cg, n->args.items[0]);
+            emit(cg, OP_FFI, 7, R_TMP, R_TMP + 1);
+            break;
+        }
         /* 内置: 真实 LLM 回复 (ESP32 版) — llm_query()
          *   llm_query() → FFI 6, R_TMP = 1 成功 / 0 失败
          *   FFI 内部: ESP32 作为 TCP client 连 Mac 网关(:9101) →
@@ -531,6 +541,27 @@ static void cg_expr(Cg* cg, AstNode* n) {
                 emit(cg, OP_HW_DEV_CALL, R_TMP, ci_hw, (int64_t)R_TMP + 1);
             } else {
                 emit(cg, OP_HW_DEV_CALL, R_TMP, ci_hw, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: TFT 模组故障诊断 (2026-09-24) — hw_fault("cmd") / hw_fault("cmd", 数值)
+         *   hw_fault(s)      → OP_HW_FAULT_CALL R_TMP, ci, 0
+         *   hw_fault(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 诊断结果: scan=故障数 (0=健康) / pin N=故障码 /
+         *           inject 0=成功 / -1 回绕 255=未识别或参数非法
+         *   .mo 用法: void f1 : int = hw_fault("scan")
+         *             void f2 : int = hw_fault("pin ", 7)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_fault") == 0) {
+            int ci_fl = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_fl < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_FAULT_CALL, R_TMP, ci_fl, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_FAULT_CALL, R_TMP, ci_fl, 0);
             }
             cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
             break;

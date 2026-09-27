@@ -109,6 +109,9 @@ typedef enum {
 
     /* ---- 硬件设备命令分发 (hw_dev, 2026-09-07) — 追加在枚举末尾保持旧编号不变 ---- */
     OP_HW_DEV_CALL,  /* HW_DEV_CALL dst_reg, cmd_const_idx: dst = hw_dev_dispatch(cmd串) */
+
+    /* ---- TFT 模组硬件故障诊断 (hw_fault, 2026-09-24) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_FAULT_CALL, /* HW_FAULT_CALL dst_reg, cmd_const_idx: dst = hw_fault_cmd(cmd串) */
 } KillsOp;
 
 /* 指令 (内部表示, 供解释器/编译器用) */

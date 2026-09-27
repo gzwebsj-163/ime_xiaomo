@@ -25,6 +25,10 @@
 #include "hw_oem.h"
 #include "hw_hex.h"
 #include "hw_dev.h"
+#include "hw_token.h"
+#include "hw_fault.h"
+#include "hw_asr.h"
+#include "infer.h"
 
 static char* read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -417,7 +421,11 @@ static void print_usage(const char* prog) {
     printf("  %s hwprobe             硬件探测演示 (PCI/USB/串口/CPU/内存/GPU)\n", prog);
     printf("  %s sig                 OEM 设备签名 (熔丝 hex -> R127 只读标志)\n", prog);
     printf("  %s sigprobe            签名寄存器攻防演示 (越权写被屏蔽)\n", prog);
+    printf("  %s token               跨模式域令牌卡 (10域派生/seal-open/自检)\n", prog);
+    printf("  %s asr [...]           语音识别双引擎 (demo/list/enroll/match/online)\n", prog);
+    printf("  %s infer <kbc> ...    kbc 自动推理 (text/voice/loop, 配 examples/intent/)\n", prog);
     printf("  %s hwdev [cmd]         hw_dev 命令分发 (无参=演示; 命令串须含 \"\\n\\r \" 尾缀)\n", prog);
+    printf("  %s hwfault [...]       TFT 模组故障诊断 (card/scan/pin N/inject N CODE/clear/mode/selftest)\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -447,8 +455,16 @@ int main(int argc, char** argv) {
         return hw_oem_sig_cli();
     } else if (strcmp(cmd, "sigprobe") == 0) {
         return hw_sigprobe_run();
+    } else if (strcmp(cmd, "token") == 0) {
+        return hw_token_cli();
+    } else if (strcmp(cmd, "asr") == 0) {
+        return hw_asr_cli(argc, argv);
+    } else if (strcmp(cmd, "infer") == 0) {
+        return infer_cmd(argc, argv);
     } else if (strcmp(cmd, "hwdev") == 0) {
         return cmd_hwdev(argc >= 3 ? argv[2] : NULL);
+    } else if (strcmp(cmd, "hwfault") == 0) {
+        return hw_fault_cli(argc, argv);
     } else {
         print_usage(argv[0]);
         return 1;
