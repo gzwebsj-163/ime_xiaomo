@@ -29,3 +29,17 @@ gen_tmp/
 vframes*/
 *.npy
 *.npz
+
+# Linux 磁盘镜像与备份（76MB+，不入库）
+linux/diskimage-linux-riscv-2018-09-23/*.bin
+*.bak-*
+linux/tinyemu-2019-12-21/
+
+# ASR 本地模板库（运行时生成）
+.asr/
+
+# 二进制固件/镜像产物
+*.bin
+*.img
+*.elf
+*.kbc.bak
