@@ -1,0 +1,498 @@
+{
+ "dim": 64,
+ "hidden": 16,
+ "ncls": 6,
+ "q16": 65536,
+ "samples": [
+  {
+   "text": "开灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "把灯打开",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "打开客厅的灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "帮我开一下灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "开一下灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "麻烦开灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "灯打开",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "open light",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "light on",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "turn on the light",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "开个灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "把台灯打开",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "夜里把灯打开",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "请打开卧室的灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "我要开灯",
+   "label": 1,
+   "group": "train"
+  },
+  {
+   "text": "关灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "把灯关掉",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "关掉客厅的灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "帮我关一下灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "麻烦关灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "灯关掉",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "close light",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "light off",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "turn off the light",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "把台灯关掉",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "别忘了把灯关了",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "关闭灯光",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "睡觉前关灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "请关掉所有灯",
+   "label": 2,
+   "group": "train"
+  },
+  {
+   "text": "播放音乐",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "放首歌",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "来点音乐",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "play music",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "我要听歌",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "放一首歌",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "来首歌吧",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "音乐播放",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "play a song",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "听音乐",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "给我放点歌",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "放点轻音乐",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "想听周杰伦",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "来首老歌",
+   "label": 3,
+   "group": "train"
+  },
+  {
+   "text": "几点了",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "现在几点",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "查一下时间",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "现在时间",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "what time is it",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "报时",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "告诉我现在几点",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "时间查询",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "今天几号",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "现在什么时间",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "现在多少点了",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "帮我看看时间",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "今天星期几",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "现在几点钟了",
+   "label": 4,
+   "group": "train"
+  },
+  {
+   "text": "今天天气怎么样",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "查天气",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "明天下雨吗",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "weather today",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "今天热不热",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "会不会下雨",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "天气预报",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "查一下天气",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "外面冷不冷",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "明天天气",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "今天出门要带伞吗",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "周末天气如何",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "现在多少度",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "外面有没有下雨",
+   "label": 5,
+   "group": "train"
+  },
+  {
+   "text": "讲个笑话",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "你是谁",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "你叫什么名字",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "停止",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "取消",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "再见",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "帮帮我",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "你好",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "谢谢",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "音量调大一点",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "hello",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "你是机器人吗",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "给我讲个故事",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "不重要",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "随便聊聊",
+   "label": 0,
+   "group": "train"
+  },
+  {
+   "text": "开一下台灯",
+   "label": 1,
+   "group": "holdout"
+  },
+  {
+   "text": "把灯全打开",
+   "label": 1,
+   "group": "holdout"
+  },
+  {
+   "text": "灯可以关了",
+   "label": 2,
+   "group": "holdout"
+  },
+  {
+   "text": "把灯都关上",
+   "label": 2,
+   "group": "holdout"
+  },
+  {
+   "text": "来一首歌听听",
+   "label": 3,
+   "group": "holdout"
+  },
+  {
+   "text": "放音乐吧",
+   "label": 3,
+   "group": "holdout"
+  },
+  {
+   "text": "现在的时间是多少",
+   "label": 4,
+   "group": "holdout"
+  },
+  {
+   "text": "几点钟",
+   "label": 4,
+   "group": "holdout"
+  },
+  {
+   "text": "明天会下雨吗",
+   "label": 5,
+   "group": "holdout"
+  },
+  {
+   "text": "今天天气好不好",
+   "label": 5,
+   "group": "holdout"
+  },
+  {
+   "text": "今天吃什么",
+   "label": 0,
+   "group": "holdout"
+  },
+  {
+   "text": "你怎么这么聪明",
+   "label": 0,
+   "group": "holdout"
+  }
+ ]
+}
