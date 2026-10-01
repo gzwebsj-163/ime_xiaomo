@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xdebugd · xiaomo 调试工作台</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand">🐞 xdebugd<span class="sub">xiaomo Debug Workbench</span></div>
+  <div class="loadrow">
+    <select id="programs"><option value="">(扫描中…)</option></select>
+    <button id="btnLoad" class="primary">载入</button>
+    <input id="manualPath" placeholder="或直接输入路径，如 examples/func.mo" spellcheck="false">
+  </div>
+  <div id="machine" class="machine">
+    <span class="chip" id="chipLoaded">未载入</span>
+    <span class="chip" id="chipPc">pc=—</span>
+    <span class="chip" id="chipSteps">steps=0</span>
+    <span class="chip" id="chipReason">—</span>
+    <span class="chip" id="chipRun">idle</span>
+  </div>
+</header>
+
+<nav id="toolbar">
+  <button id="btnRun"   class="primary" title="整跑（上电复位，保留断点/watch）">▶ 运行</button>
+  <button id="btnRestart" title="从头上电重启">⟲ 重启</button>
+  <button id="btnPause" title="暂停（任意安全点生效，可中断 input_wait）">⏸ 暂停</button>
+  <span class="sep"></span>
+  <button id="btnStep" title="单步（不查断点，永远前进）">⤵ 单步</button>
+  <button id="btnOver" title="步过：CALL 当整体越过">⇥ 步过</button>
+  <button id="btnOut"  title="步出：回到更浅层">⇧ 步出</button>
+  <button id="btnCont" title="继续跑到断点/预算">⏩ 继续</button>
+  <span class="sep"></span>
+  <button id="btnResetBoard" class="ghost" title="HardReset：DTR 全程 False + RTS 1→0 脉冲">⚡ 真机复位</button>
+  <label class="chk"><input type="checkbox" id="followPc" checked> 跟随 pc</label>
+  <label class="chk"><input type="checkbox" id="autoTrace" checked> 自动拉 trace</label>
+  <span class="grow"></span>
+  <span id="hint" class="hint"></span>
+</nav>
+
+<main>
+  <section class="panel disasm-panel">
+    <div class="ph">
+      <span>反汇编</span>
+      <span class="phr">
+        <button id="dPrev" class="mini" title="上一页">⟨</button>
+        <button id="dNext" class="mini" title="下一页">⟩</button>
+        <span id="codeInfo" class="dim">—</span>
+        <button id="btnDisasmRefresh" class="mini" title="刷新">↻</button>
+      </span>
+    </div>
+    <div id="disasm" class="code"></div>
+    <div class="ph sub-ph"><span>常量池 / 函数表</span></div>
+    <div class="code small">
+      <div id="consts" class="kv"></div>
+      <div id="funcs" class="kv"></div>
+    </div>
+  </section>
+
+  <section class="panel side">
+    <div class="tabs">
+      <button class="tab active" data-tab="regs">寄存器</button>
+      <button class="tab" data-tab="out">输出</button>
+      <button class="tab" data-tab="trace">追踪</button>
+      <button class="tab" data-tab="watch">监视</button>
+      <button class="tab" data-tab="board">真机</button>
+    </div>
+
+    <div class="tabbody">
+      <!-- 寄存器 -->
+      <div class="tabpane active" id="pane-regs">
+        <div class="pane-h">
+          <input id="regFilter" placeholder="过滤 r 编号，如 1 或 57" spellcheck="false">
+          <span class="dim" id="regCount"></span>
+        </div>
+        <div id="regs" class="reggrid"></div>
+      </div>
+
+      <!-- 输出 -->
+      <div class="tabpane" id="pane-out">
+        <div class="pane-h">
+          <span class="dim">程序 stdout（print / VM 输出）</span>
+          <button class="mini" data-clear="out">清屏</button>
+        </div>
+        <div id="out" class="log"></div>
+        <div class="stdin">
+          <input id="stdinLine" placeholder="输入一行喂给 input()（回车发送）" spellcheck="false">
+          <button id="btnSend">发送</button>
+        </div>
+      </div>
+
+      <!-- 追踪 -->
+      <div class="tabpane" id="pane-trace">
+        <div class="pane-h">
+          <span class="dim">指令追踪（每步一行）</span>
+          <button class="mini" data-clear="trace">清屏</button>
+        </div>
+        <div id="trace" class="log mono"></div>
+      </div>
+
+      <!-- 监视 -->
+      <div class="tabpane" id="pane-watch">
+        <div class="pane-h">
+          <span class="dim">值变化打点（基线=加 watch 时刻）</span>
+          <button class="mini" data-clear="wlog">清屏</button>
+        </div>
+        <div id="wlog" class="log mono"></div>
+      </div>
+
+      <!-- 真机 -->
+      <div class="tabpane" id="pane-board">
+        <div class="board-ctl">
+          <select id="ports"><option value="">— 刷新端口列表 —</option></select>
+          <select id="baud">
+            <option>9600</option><option>57600</option>
+            <option selected>115200</option><option>230400</option>
+          </select>
+          <button id="btnBoardRefresh" class="mini">↻</button>
+          <button id="btnBoardOpen" class="primary">打开</button>
+          <button id="btnBoardClose">关闭</button>
+        </div>
+        <div class="pane-h">
+          <span class="dim" id="boardState">串口未打开</span>
+          <label class="chk"><input type="checkbox" id="boardFollow" checked> 自动滚动</label>
+        </div>
+        <div id="board" class="log board"></div>
+        <div class="stdin">
+          <input id="boardLine" placeholder="发送一行到串口（自动补 \n）" spellcheck="false">
+          <button id="btnBoardSend">发送</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer id="status">
+  <span id="stPath">—</span>
+  <span class="sep"></span>
+  <span id="stErr" class="err"></span>
+  <span class="grow"></span>
+  <span id="stNet" class="dim">连接中…</span>
+</footer>
+
+<script src="./app.js"></script>
+</body>
+</html>

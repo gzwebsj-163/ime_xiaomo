@@ -23,11 +23,19 @@
 #include "mo2kbc.h"
 #include "hw_demo.h"
 #include "hw_oem.h"
+#include "debug_tool.h"
 #include "hw_hex.h"
 #include "hw_dev.h"
 #include "hw_token.h"
 #include "hw_fault.h"
 #include "hw_asr.h"
+#include "hw_core.h"
+#include "hw_main.h"
+#include "hw_wdbg.h"
+#include "hw_flash.h"
+#include "hw_pin.h"
+#include "hw_dc.h"
+#include "hw_dmc.h"
 #include "infer.h"
 
 static char* read_file(const char* path) {
@@ -426,6 +434,14 @@ static void print_usage(const char* prog) {
     printf("  %s infer <kbc> ...    kbc 自动推理 (text/voice/loop, 配 examples/intent/)\n", prog);
     printf("  %s hwdev [cmd]         hw_dev 命令分发 (无参=演示; 命令串须含 \"\\n\\r \" 尾缀)\n", prog);
     printf("  %s hwfault [...]       TFT 模组故障诊断 (card/scan/pin N/inject N CODE/clear/mode/selftest)\n", prog);
+    printf("  %s core [...]          内核 DNA 编码层 (dna/idx N/slot N CODE/free N/slots/mode/selftest)\n", prog);
+    printf("  %s main [...]          hw 家族总调度 (card/selftest/count/idx N/find ID/mode/sum/ok/probe ID)\n", prog);
+    printf("  %s wdbg [...]          无线调试器信号层 (card/selftest + bridge/pwm/spi/i2c/pin/status)\n", prog);
+    printf("  %s pin [...]           引脚档案/双模驱动/编程电压 (card/profiles/load/id/wtest/vpp/selftest)\n", prog);
+    printf("  %s pin isp [...]       UART ISP 烧录 (AN3155: info/erase/read/go/wtest/chk)\n", prog);
+    printf("  %s dc [...]            DC 电源信号层 (card/sig N/set N V/base N/range N/data N/selftest)\n", prog);
+    printf("  %s dmc [...]           DMC 主从链路层 (count/cmds/states/errs/golden/frame/ok/crcvec/hello/selftest)\n", prog);
+    printf("  %s debug <sub> [...]    排障三层证据链: ast/bc/tr(断点+watch)/regs\n", prog);
 }
 
 int main(int argc, char** argv) {
@@ -465,6 +481,24 @@ int main(int argc, char** argv) {
         return cmd_hwdev(argc >= 3 ? argv[2] : NULL);
     } else if (strcmp(cmd, "hwfault") == 0) {
         return hw_fault_cli(argc, argv);
+    } else if (strcmp(cmd, "core") == 0) {
+        return hw_core_cli(argc, argv);
+    } else if (strcmp(cmd, "main") == 0) {
+        return hw_main_cli(argc, argv);
+    } else if (strcmp(cmd, "wdbg") == 0) {
+        return hw_wdbg_cli(argc, argv);
+    } else if (strcmp(cmd, "flash") == 0) {
+        return hw_flash_cli(argc, argv);
+    } else if (strcmp(cmd, "pin") == 0) {
+        return hw_pin_cli(argc, argv);
+    } else if (strcmp(cmd, "dc") == 0) {
+        return hw_dc_cli(argc, argv);
+    } else if (strcmp(cmd, "dmc") == 0) {
+        return hw_dmc_cli(argc, argv);
+    } else if (strcmp(cmd, "debug") == 0) {
+        /* debug 工具: 排障三层证据链 (ast/bc/tr/regs), 传 (argc-1, argv+1) */
+        if (argc >= 3) return debug_tool_main(argc - 1, argv + 1);
+        return debug_tool_main(1, argv);
     } else {
         print_usage(argv[0]);
         return 1;

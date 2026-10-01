@@ -79,6 +79,9 @@ static CgFunc* cgfunc_add(CgFuncTab* t, const char* name) {
     if (t->count >= t->cap) { t->cap = t->cap ? t->cap * 2 : 16; t->items = (CgFunc*)realloc(t->items, t->cap * sizeof(CgFunc)); }
     CgFunc* f = &t->items[t->count++];
     f->name = strdup(name); f->index = t->count - 1; f->entry_pc = -1; f->nparams = 0;
+    f->ret_float = 0;   /* 必须显式清零: realloc 槽位是脏堆内存, 残留值会把 CALL 结果
+                           随机标成浮点 → print 走 %g 打裸整数 → 反常数乱码
+                           (长驻进程如 xdebugd 堆复用后 ~50% 概率复现) */
     return f;
 }
 
@@ -562,6 +565,157 @@ static void cg_expr(Cg* cg, AstNode* n) {
                 emit(cg, OP_HW_FAULT_CALL, R_TMP, ci_fl, (int64_t)R_TMP + 1);
             } else {
                 emit(cg, OP_HW_FAULT_CALL, R_TMP, ci_fl, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: 内核 DNA 编码层 (2026-09-28) — hw_core("cmd") / hw_core("cmd", 数值)
+         *   hw_core(s)      → OP_HW_CORE_CALL R_TMP, ci, 0
+         *   hw_core(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果: count=10 / ok=1 / idx N=DNA编码 / slot,free=0 /
+         *           -1 回绕 255=未识别或参数非法
+         *   .mo 用法: void c1 : int = hw_core("count")
+         *             void c2 : int = hw_core("idx ", 3)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_core") == 0) {
+            int ci_co = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_co < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_CORE_CALL, R_TMP, ci_co, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_CORE_CALL, R_TMP, ci_co, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: hw 家族总调度 (hw_main, 2026-09-28) — hw_main("cmd") / hw_main("cmd", 数值)
+         *   hw_main(s)      → OP_HW_MAIN_CALL R_TMP, ci, 0
+         *   hw_main(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果: count=8 / sum=1604573786(黄金) / ok=1 /
+         *           idx N=类ID / find ID=表序 / probe ID=探针 / -1 回绕 255=未识别
+         *   .mo 用法: void c1 : int = hw_main("count")
+         *             void f1 : int = hw_main("probe ", 152)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_main") == 0) {
+            int ci_mn = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_mn < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_MAIN_CALL, R_TMP, ci_mn, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_MAIN_CALL, R_TMP, ci_mn, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: 无线调试器信号层 (hw_wdbg, 2026-09-29) — hw_wdbg("cmd") / hw_wdbg("cmd", 数值)
+         *   hw_wdbg(s)      → OP_HW_WDBG_CALL R_TMP, ci, 0
+         *   hw_wdbg(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果码: 0=OK / 1=NOARGS / 2=BADARG / 3=IOERR / 4=STATE /
+         *           -1 回绕 255=未识别 / -2 回绕 254=help
+         *   .mo 用法: void r1 : int = hw_wdbg("bridge open 115200")
+         *             void r2 : int = hw_wdbg("pwm out ", 1000)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_wdbg") == 0) {
+            int ci_wd = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_wd < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_WDBG_CALL, R_TMP, ci_wd, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_WDBG_CALL, R_TMP, ci_wd, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: ESP32 ROM 下载协议烧录层 (hw_flash, 2026-09-30) —
+         *       hw_flash("cmd") / hw_flash("cmd", 数值)
+         *   hw_flash(s)      → OP_HW_FLASH_CALL R_TMP, ci, 0
+         *   hw_flash(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果码: 0=OK / 1=NOARGS / 2=BADARG / 3=IOERR / 4=PROTO /
+         *           5=CHECKSUM / 6=BADSIZE / -1 回绕 255=未识别 / -2 回绕 254=help
+         *   .mo 用法: void r1 : int = hw_flash("run 4096")
+         *             void r2 : int = hw_flash("run ", 8192)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_flash") == 0) {
+            int ci_fl = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_fl < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_FLASH_CALL, R_TMP, ci_fl, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_FLASH_CALL, R_TMP, ci_fl, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: 引脚档案/双模驱动/编程电压层 (hw_pin, 2026-09-30) —
+         *       hw_pin("cmd") / hw_pin("cmd", 数值)
+         *   hw_pin(s)      → OP_HW_PIN_CALL R_TMP, ci, 0
+         *   hw_pin(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果码: 0=OK / 1=NOARGS / 2=BADARG / 3=IOERR / 4=NOFLASH /
+         *           5=VERIFY / 6=NODEV / 7=RANGE / -1 回绕 255=未识别 / -2 回绕 254=help
+         *   .mo 用法: void r1 : int = hw_pin("id")
+         *             void r2 : int = hw_pin("vpp ", 2)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_pin") == 0) {
+            int ci_pn = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_pn < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_PIN_CALL, R_TMP, ci_pn, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_PIN_CALL, R_TMP, ci_pn, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: DC 电源信号层 (hw_dc, 2026-10-01) — hw_dc("cmd") / hw_dc("cmd", 数值)
+         *   hw_dc(s)      → OP_HW_DC_CALL R_TMP, ci, 0
+         *   hw_dc(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果: count=8 / datacount=7 / ok=1 / sig N=读数 /
+         *           base N=参考预值 / range N=1|0 / data N=组合帧 /
+         *           -1 回绕 255=未识别 / -2 回绕 254=help
+         *   .mo 用法: void c1 : int = hw_dc("count")
+         *             void c2 : int = hw_dc("set ", 42)   ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_dc") == 0) {
+            int ci_dc = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_dc < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_DC_CALL, R_TMP, ci_dc, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_DC_CALL, R_TMP, ci_dc, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
+        /* 内置: DMC 设备管理层 (hw_dmc, 2026-10-01) — hw_dmc("cmd") / hw_dmc("cmd", 数值)
+         *   hw_dmc(s)      → OP_HW_DMC_CALL R_TMP, ci, 0
+         *   hw_dmc(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码
+         *     (vm 侧 imm-1 还原寄存器, 十进制追加到命令串尾 → 动态参数)
+         *   R_TMP = 结果: count=9 / states=7 / errs=8 / golden=0x169A603E /
+         *           ok=1 / crcvec=1 / frame=258 / hello=1 /
+         *           -1 未识别 / -2 help
+         *   .mo 用法: void c1 : int = hw_dmc("count")
+         *             void c2 : int = hw_dmc("send ", 42)  ← 数值动态拼接 */
+        if (n->text && strcmp(n->text, "hw_dmc") == 0) {
+            int ci_dmc = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_dmc < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_DMC_CALL, R_TMP, ci_dmc, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_DMC_CALL, R_TMP, ci_dmc, 0);
             }
             cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
             break;

@@ -18,7 +18,14 @@
 #include "hw_direct.h"
 #include "hw_oem.h"
 #include "hw_dev.h"
+#include "hw_wdbg.h"
+#include "hw_flash.h"
+#include "hw_pin.h"
+#include "hw_dc.h"
+#include "hw_dmc.h"
 #include "hw_fault.h"
+#include "hw_core.h"
+#include "hw_main.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -139,11 +146,17 @@ static void kvm_add_output(KillsVM* vm, const char* s) { kvm_add_output_ex(vm, s
  * 链式 print/LLM append 的拼接机制依赖 output[last] 持续累积;
  * 每轮回复完整缓冲后, 回到 input_wait 阻塞等待下一轮输入 → 此刻 flush
  * 恰好整行输出一轮回复。⚠️ 不能在每条指令后 flush(拆碎拼接)。 */
+/* ── flush 重定向 (xdebugd 调试软件): input_wait 清空输出前回调, 行搬进调试会话 ── */
+static kvm_flush_fn g_flush_redirect = NULL;
+void kvm_set_flush_redirect(kvm_flush_fn fn) { g_flush_redirect = fn; }
+
 static void kvm_flush_output(KillsVM* vm) {
     if (vm->output_count > 0) {
+        /* xdebugd 重定向: 清空前把行搬进调试会话缓冲 (默认 NULL = 原行为) */
+        if (g_flush_redirect) g_flush_redirect(vm);
         for (int i = 0; i < vm->output_count; i++) {
             if (vm->output[i]) {
-                printf("%s\n", vm->output[i]);
+                if (!g_flush_redirect) printf("%s\n", vm->output[i]);
                 free(vm->output[i]);
                 vm->output[i] = NULL;
             }
@@ -362,7 +375,16 @@ static void kvm_ffi(KillsVM* vm, int idx, int result_reg, int64_t imm_arg) {
                   (宿主: 轮询+usleep 让步 + flush 对齐 ESP32 版;
                    ⚠️ 轮询等待期间 flush: LLM 回复 append 到已有行, count 不变,
                    交互主线程按 count 增量轮询看不到 → 必须靠这里整行 flush) */
-        while (!kvm_io_pop()) { kvm_flush_output(vm); usleep(20000); }
+        while (!kvm_io_pop()) {
+            kvm_flush_output(vm);
+            if (vm->dbg_cancel) {      /* xdebugd 取消: 交换程序/复位时强制退出等待 */
+                vm->halted = 1;
+                vm->regs[result_reg] = 0;
+                break;
+            }
+            usleep(20000);
+        }
+        if (vm->dbg_cancel) break;    /* 取消时不回显不分类, 直接落回主循环退出 */
         char echo[2100]; snprintf(echo, sizeof(echo), "> %s", g_input_line);
         kvm_add_output(vm, echo);
         int cid = input_classify(g_input_line);
@@ -419,6 +441,10 @@ static int is_reg_operand(int32_t b) { return b >= 0; }
 int kvm_run(KillsVM* vm, const KillsProgram* prog) {
     if (!vm || !prog) return 1;
     vm->prog = prog;
+    if (vm->dbg_resume) {
+        /* 续跑 (xdebugd 调试会话): 跳过上电复位, 从当前现场继续 */
+        vm->dbg_resume = 0;
+    } else {
     vm->pc = 0;
     vm->halted = 0;
     vm->steps = 0;
@@ -436,6 +462,26 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
     /* hw_fault 故障注入表/BSP 上电复位: 健康态起步 (旧注入不跨运行残留) */
     hw_fault_init(NULL);
 
+    /* hw_core 内核 DNA 层上电: 黄金自证 + 槽位复位 (旧槽不跨运行残留) */
+    hw_core_init(NULL);
+
+    /* hw_main 家族总调度上电: 黄金自证 + 探针缓存复位 (幂等) */
+    hw_main_init(NULL);
+
+    /* hw_wdbg 无线调试器信号层上电: 桥接/监控/线序复位 (旧状态不跨运行残留) */
+    hw_wdbg_init(NULL);
+
+    /* hw_flash ROM 烧录层上电: 会话/计数/BSP/静态 flash 模型复位 (旧状态不跨运行残留) */
+    hw_flash_init(NULL);
+
+    /* hw_pin 引脚档案层上电: 活动档案/GPIO 电平/器件模型复位 (旧状态不跨运行残留) */
+    hw_pin_init(NULL);
+
+    /* hw_dc DC 电源信号层上电: 黄金自证 + 信号/极值/BSP 复位 (旧状态不跨运行残留) */
+    hw_dc_init(NULL);
+    }
+    vm->stop_request = 0;
+
     /* 每帧保存: 返回 PC + 快照区寄存器 = 1+KILLS_SNAP_NREG 个 u64 */
     while (!vm->halted) {
         if (vm->steps++ > vm->step_limit) {
@@ -446,6 +492,14 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
         if (vm->pc >= prog->code_count) break;
         KillsIns* ins = &prog->code[vm->pc];
         uint32_t next_pc = vm->pc + 1;
+
+        /* 调试钩子 (debug 工具): 每步执行前回调; 返回非 0 -> 提前停机。
+         * 停机语义: vm->pc 停在当前指令, halted 不置位, stop_request 置 1。 */
+        if (vm->dbg_hook &&
+            vm->dbg_hook(vm->dbg_ud, vm, ins, next_pc, (uint64_t)vm->steps) != 0) {
+            vm->stop_request = 1;
+            return 0;
+        }
 
         switch (ins->op) {
         case OP_NOP: break;
@@ -809,6 +863,193 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             }
             break;
         }
+        case OP_HW_CORE_CALL: {
+            /* 内核 DNA 编码层 (2026-09-28): dst = hw_core_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_core("fmt", 数值) 的编译产物);
+             * 返回: >=0 结果 (count/ok/idx N/slot/free/mode) / -1 未识别
+             *   (uint8 回绕 → 255); arg 传 vm 供未来真机联动内核。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char corebuf[512];
+                    snprintf(corebuf, sizeof(corebuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_core_cmd(corebuf, vm);
+                } else {
+                    rc = hw_core_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_MAIN_CALL: {
+            /* hw 家族总调度 (2026-09-28): dst = hw_main_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV/CORE_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_main("fmt", 数值) 的编译产物);
+             * 命令: count=8 / sum=1604573786(黄金)/ ok=1 / idx N=类ID /
+             *        find ID=表序 / probe ID=探针结果 / probeall / selftest;
+             * 返回: >=0 结果 / -1 未识别 (uint8 回绕 → 255)。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char mainbuf[512];
+                    snprintf(mainbuf, sizeof(mainbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_main_cmd(mainbuf, vm);
+                } else {
+                    rc = hw_main_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_WDBG_CALL: {
+            /* 无线调试器信号层 (2026-09-29): dst = hw_wdbg_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV/CORE/MAIN_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_wdbg("fmt", 数值) 的编译产物);
+             * 命令: bridge open|close|baud|wr|rd|stat / pwm out|off|inject|meas|stat /
+             *       spi mode|xfer|list|clr / i2c wr|rd|list|clr /
+             *       pin def|get|set|reset / status / count / mode / help;
+             * 返回: >=0 结果码 (0x00 OK / 0x01 NOARGS / 0x02 BADARG /
+             *       0x03 IOERR / 0x04 STATE) / -1 未识别 / -2 help。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char wdbuf[512];
+                    snprintf(wdbuf, sizeof(wdbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_wdbg_cmd(wdbuf, vm);
+                } else {
+                    rc = hw_wdbg_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_FLASH_CALL: {
+            /* ESP32 ROM 下载协议烧录层 (2026-09-30): dst = hw_flash_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV/CORE/MAIN/WDBG_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_flash("fmt", 数值) 的编译产物);
+             * 命令: card|mode|slip|md5|sync|chip|run N|verify|stat|selftest
+             * 返回: >=0 结果码 (0x00 OK / 0x01 NOARGS / 0x02 BADARG /
+             *       0x03 IOERR / 0x04 PROTO / 0x05 CHECKSUM / 0x06 BADSIZE) /
+             *       -1 未识别 / -2 help。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char flbuf[512];
+                    snprintf(flbuf, sizeof(flbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_flash_cmd(flbuf, vm);
+                } else {
+                    rc = hw_flash_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_PIN_CALL: {
+            /* 引脚档案/双模驱动/编程电压层 (2026-09-30): dst = hw_pin_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV/CORE/MAIN/WDBG/FLASH_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_pin("fmt", 数值) 的编译产物);
+             * 命令: card|mode|profiles|load NAME|valid|drv hw|bb|id|read A|
+             *       erase A|wtest|vpp N|vppread|stat|selftest
+             * 返回: >=0 结果码 (0x00 OK / 0x01 NOARGS / 0x02 BADARG / 0x03 IOERR /
+             *       0x04 NOFLASH / 0x05 VERIFY / 0x06 NODEV / 0x07 RANGE) /
+             *       -1 未识别 / -2 help。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char pnbuf[512];
+                    snprintf(pnbuf, sizeof(pnbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_pin_cmd(pnbuf, vm);
+                } else {
+                    rc = hw_pin_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_DC_CALL: {
+            /* DC 电源信号层 (2026-10-01): dst = hw_dc_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DEV/CORE/MAIN/WDBG/FLASH/PIN_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_dc("fmt", 数值) 的编译产物);
+             * 命令: count|datacount|ok|mode|sig N|name N|set N V|base N|
+             *       range N|data N|help
+             * 返回: >=0 结果 (count=8 / ok=1 / sig N=读数 / base=参考预值 /
+             *       range=1|0 / data=组合帧) / -1 未识别或参数非法 / -2 help。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char dcbuf[512];
+                    snprintf(dcbuf, sizeof(dcbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_dc_cmd(dcbuf, vm);
+                } else {
+                    rc = hw_dc_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
+        case OP_HW_DMC_CALL: {
+            /* DMC 设备管理层 (2026-10-01): dst = hw_dmc_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DC_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_dmc("fmt", 数值) 的编译产物);
+             * 命令: count|cmds|states|errs|golden|frame|ok|crcvec|hello|selftest|help
+             * 返回: >=0 结果 (count=9 / states=7 / errs=8 / golden=0x169A603E /
+             *       ok=1 / crcvec=1 / frame=258 / hello=1) / -1 未识别 / -2 help。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char dmcbuf[512];
+                    snprintf(dmcbuf, sizeof(dmcbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_dmc_cmd(dmcbuf, vm);
+                } else {
+                    rc = hw_dmc_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
         default:
             snprintf(vm->error_msg, sizeof(vm->error_msg), "unknown opcode %u at pc %u", ins->op, vm->pc);
             vm->error_count = 1; return 1;
@@ -858,6 +1099,13 @@ static const char* kvm_opname(uint8_t op) {
     case OP_HW_SIG_RD: return "HW_SIG_RD";
     case OP_HW_DEV_CALL: return "HW_DEV_CALL";
     case OP_HW_FAULT_CALL: return "HW_FAULT_CALL";
+    case OP_HW_CORE_CALL: return "HW_CORE_CALL";
+    case OP_HW_MAIN_CALL: return "HW_MAIN_CALL";
+    case OP_HW_WDBG_CALL: return "HW_WDBG_CALL";
+    case OP_HW_FLASH_CALL: return "HW_FLASH_CALL";
+    case OP_HW_PIN_CALL: return "HW_PIN_CALL";
+    case OP_HW_DC_CALL: return "HW_DC_CALL";
+    case OP_HW_DMC_CALL: return "HW_DMC_CALL";
     case OP_FADD: return "FADD"; case OP_FSUB: return "FSUB"; case OP_FMUL: return "FMUL";
     case OP_FDIV: return "FDIV"; case OP_F2I: return "F2I"; case OP_I2F: return "I2F";
     default: return "?";
@@ -875,6 +1123,9 @@ void kvm_disassemble(const KillsProgram* p, char* buf, int buflen) {
                         i, kvm_opname(ins->op), ins->a, ins->b, (long long)ins->imm);
     }
 }
+
+/* pub: 指令名 (debug 工具单行 trace 用) */
+const char* kvm_op_name(uint8_t op) { return kvm_opname(op); }
 
 /* ================= 序列化 ================= */
 /* 布局: [KILLS(5)][ver u8][flags u8][nreg u32][data_size u32][code_count u32]

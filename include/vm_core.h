@@ -112,6 +112,27 @@ typedef enum {
 
     /* ---- TFT 模组硬件故障诊断 (hw_fault, 2026-09-24) — 追加在枚举末尾保持旧编号不变 ---- */
     OP_HW_FAULT_CALL, /* HW_FAULT_CALL dst_reg, cmd_const_idx: dst = hw_fault_cmd(cmd串) */
+
+    /* ---- 内核 DNA 编码层 (hw_core, 2026-09-28) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_CORE_CALL,  /* HW_CORE_CALL dst_reg, cmd_const_idx: dst = hw_core_cmd(cmd串) */
+
+    /* ---- hw 家族统一类注册表/总调度 (hw_main, 2026-09-28) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_MAIN_CALL,  /* HW_MAIN_CALL dst_reg, cmd_const_idx: dst = hw_main_cmd(cmd串) */
+
+    /* ---- 无线调试器信号层 (hw_wdbg, 2026-09-29) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_WDBG_CALL,  /* HW_WDBG_CALL dst_reg, cmd_const_idx: dst = hw_wdbg_cmd(cmd串) */
+
+    /* ---- ESP32 ROM 下载协议烧录层 (hw_flash, 2026-09-30) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_FLASH_CALL, /* HW_FLASH_CALL dst_reg, cmd_const_idx: dst = hw_flash_cmd(cmd串) */
+
+    /* ---- 引脚档案/双模驱动/编程电压层 (hw_pin, 2026-09-30) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_PIN_CALL,   /* HW_PIN_CALL dst_reg, cmd_const_idx: dst = hw_pin_cmd(cmd串) */
+
+    /* ---- DC 电源信号层 (hw_dc, 2026-10-01) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_DC_CALL,    /* HW_DC_CALL dst_reg, cmd_const_idx: dst = hw_dc_cmd(cmd串) */
+
+    /* ---- DMC 设备管理层 (hw_dmc, 2026-10-01) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_DMC_CALL,   /* HW_DMC_CALL dst_reg, cmd_const_idx: dst = hw_dmc_cmd(cmd串) */
 } KillsOp;
 
 /* 指令 (内部表示, 供解释器/编译器用) */
@@ -128,6 +149,19 @@ typedef struct {
     uint32_t pc;     /* 入口指令下标 */
     uint32_t nparams;/* 参数个数 */
 } KillsFunc;
+
+/* ---- 调试钩子 (debug 工具, 2026-09-28) ----
+ * kvm_run 每条指令执行前回调; dbg_hook 为 NULL 时零开销(单个 if)。
+ * 返回非 0 -> kvm_run 提前停机: halted 不置位, vm->pc 停在当前指令,
+ * stop_request 置 1 —— 外部凭 pc/code_count/halted 区分「跑完」与「断下」。 */
+typedef int (*kvm_dbg_hook_fn)(void* ud, struct KillsVM* vm,
+                               const KillsIns* ins, uint32_t next_pc, uint64_t steps);
+
+/* ---- flush 重定向 (xdebugd 调试软件, 2026-09-28) ----
+ * input_wait 等待时 kvm_flush_output 把输出打到 stdout; xdebugd 设置
+ * 重定向回调后在清空前把行搬进会话缓冲 (UI 增量拉取)。NULL = 原行为。 */
+typedef int (*kvm_flush_fn)(struct KillsVM* vm);
+void kvm_set_flush_redirect(kvm_flush_fn fn);
 
 /* 常量表项 */
 typedef struct {
@@ -169,6 +203,18 @@ typedef struct KillsVM {
     uint64_t sig_fuse;       /* 熔丝值 (= HW_OEM_SIG_HEX) */
     uint8_t  sig_burned;     /* 上电烧录标记 */
     uint32_t sig_violations; /* 运行期越权写 R127 计数 (写屏蔽审计) */
+    /* ---- 调试钩子 (debug 工具, 2026-09-28) ---- */
+    void* dbg_ud;            /* 钩子用户数据 */
+    kvm_dbg_hook_fn dbg_hook;/* NULL = 无调试, 零开销 */
+    int stop_request;        /* 钩子请求停机后置 1 (诊断查询用) */
+    /* ---- 续跑标记 (xdebugd 调试软件, 2026-09-28) ----
+     * 置 1 后 kvm_run 跳过上电复位(pc/regs/栈/上电初始化), 从当前现场继续;
+     * 调用即消费(置回 0)。默认 0 -> 所有既有调用方行为不变。 */
+    int dbg_resume;
+    /* ---- 取消标志 (xdebugd 调试软件, 2026-09-28) ----
+     * FFI5 input_wait 等待循环每 20ms 检查; 置 1 -> halted=1 退出等待。
+     * 场景: 交互程序阻塞等输入时, 宿主要换程序/复位, 引擎线程必须先退出。 */
+    int dbg_cancel;
 } KillsVM;
 
 /* ---- 程序构建 ---- */
@@ -203,6 +249,7 @@ const char* kvm_io_line(void);
 
 /* ---- 反汇编 (调试) ---- */
 void kvm_disassemble(const KillsProgram* p, char* buf, int buflen);
+const char* kvm_op_name(uint8_t op);  /* 指令名 (debug 工具用) */
 
 #ifdef __cplusplus
 }

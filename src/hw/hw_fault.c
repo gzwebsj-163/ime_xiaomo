@@ -348,6 +348,15 @@ int hw_fault_selftest(int (*putf)(const char*))
     int fails = 0;
     uint32_t i;
     char line[160];
+    hw_fault_bsp_t saved_bsp = g_bsp;
+
+    /* [0] BSP 解耦: selftest 验证的是模块逻辑 = 模拟器语义 (注入表驱动)。
+     * 真机 BSP 注入后, 注入对真实 GPIO/ADC 读取不可见 → 模拟器假设用例
+     * 失效 = 真机 13-fails 根因 ([5]×10+[6]×1+[7]×2 实测吻合)。
+     * 故 selftest 期间临时卸载 BSP、结束原样恢复; 真机健康度由
+     * hw_fault_scan (真实 BSP) 独立负责, 两者不混。宿主无 BSP = 空表
+     * 保存恢复, 行为零变化 (全平台一致, 家族纪律)。 */
+    memset(&g_bsp, 0, sizeof(g_bsp));
 
     /* [1] 黄金校验和锁定 */
     FL_CHECK(hw_fault_pin_checksum() == HW_FAULT_GOLDEN);
@@ -392,6 +401,7 @@ int hw_fault_selftest(int (*putf)(const char*))
     FL_CHECK(hw_fault_cmd("bogus", NULL) == -1);
 
     hw_fault_clear_all();
+    g_bsp = saved_bsp;   /* 恢复 BSP (真机回调/宿主空表通用) */
     if (fails == 0) {
         snprintf(line, sizeof(line),
                  "hw_fault selftest: all PASS (golden=0x%08X, mode=%s)\n",

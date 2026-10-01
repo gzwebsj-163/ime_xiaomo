@@ -67,8 +67,22 @@ for mo in examples/*.mo; do
     # 不含该调用, 同 linux_* 先例), 由 C 组 hwdev 块独立覆盖。
     # hwfault_test 使用 hw_fault() 字节码内置 (OP_HW_FAULT_CALL, 同先例),
     # 由 C 组 hwfault 块独立覆盖。
+    # hwcore_test 使用 hw_core() 字节码内置 (OP_HW_CORE_CALL, 同先例),
+    # 由 C 组 hwcore 块独立覆盖。
+    # hwmain_test 使用 hw_main() 字节码内置 (OP_HW_MAIN_CALL, 同先例),
+    # 由 C 组 hwmain 块独立覆盖。
+    # wdbg_test 使用 hw_wdbg() 字节码内置 (OP_HW_WDBG_CALL, 同先例),
+    # 由 C 组 wdbg 块独立覆盖。
+    # flash_test 使用 hw_flash() 字节码内置 (OP_HW_FLASH_CALL, 同先例),
+    # 由 C 组 flash 块独立覆盖。
+    # pin_test 使用 hw_pin() 字节码内置 (OP_HW_PIN_CALL, 同先例),
+    # 由 C 组 pin 块独立覆盖。
+    # dc_test / dc_proto_test 使用 hw_dc() 字节码内置 (OP_HW_DC_CALL, 同先例),
+    # 由 C 组 hwdc / hwdc proto 块独立覆盖。
+    # dmc_test 使用 hw_dmc() 字节码内置 (OP_HW_DMC_CALL, 同先例),
+    # 由 C 组 dmc / dmc .mo→kbc 块独立覆盖。
     case "$name" in
-      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test|hwfault_test)
+      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test|hwfault_test|hwcore_test|hwmain_test|wdbg_test|flash_test|pin_test|dc_test|dc_proto_test|dmc_test)
         echo "  [SKIP] mo2kbc $name (内核扩展专属: 张量算子/真Linux内核)"
         continue
         ;;
@@ -207,6 +221,521 @@ else
     echo "$flm_out" | sed 's/^/    /'
     FAIL=$((FAIL+1)); FAILED_NAMES+=("hwfault mo2kbc")
 fi
+
+# ---- hw_core 内核 DNA 编码层 (2026-09-28) ----
+co_out=$("$BIN" core 2>&1); co_rc=$?
+if [ $co_rc -eq 0 ] && echo "$co_out" | grep -q "golden OK" \
+   && echo "$co_out" | grep -q "count=10" \
+   && echo "$co_out" | grep -q "slot 3 = 0x0080 -> used = 1" \
+   && echo "$co_out" | grep -q "free 3  -> used = 0"; then
+    green "  [PASS] hwcore (能力卡/黄金校验和/槽位装载演示)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwcore (能力卡输出异常 rc=$co_rc)"
+    echo "$co_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwcore")
+fi
+
+# hwcore 自检 (黄金锁定/表序对拍/槽位生命周期/命令分发)
+cos_out=$("$BIN" core selftest 2>&1); cos_rc=$?
+if [ $cos_rc -eq 0 ] && echo "$cos_out" | grep -q "all PASS"; then
+    green "  [PASS] hwcore selftest (黄金锁定/表序对拍/槽位生命周期/命令分发)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwcore selftest (rc=$cos_rc)"
+    echo "$cos_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwcore selftest")
+fi
+
+# hwcore .mo → kbc 端到端: hw_core()内置 → OP_HW_CORE_CALL → hw_core_cmd
+# 双参 imm 编码: hw_core("idx ", 3) → 拼接 "idx 3" → 221 (0x00DD SNG);
+#   (拼接失败则 strtol 空串/越界 → -1 回绕 255, rc=221 即 imm 动态拼接生效铁证)
+com_out=$("$BIN" mo2kbc examples/hwcore_test.mo 2>&1)
+if echo "$com_out" | grep -q "count rc=10" && echo "$com_out" | grep -q "ok    rc=1" \
+   && echo "$com_out" | grep -q "idx0  rc=3567" && echo "$com_out" | grep -q "idx9  rc=4093" \
+   && echo "$com_out" | grep -q "idx3v rc=221" && echo "$com_out" | grep -q "slot  rc=0" \
+   && echo "$com_out" | grep -q "used1 rc=1" && echo "$com_out" | grep -q "free  rc=0" \
+   && echo "$com_out" | grep -q "used2 rc=0"; then
+    green "  [PASS] hwcore .mo→kbc (hw_core()内置+双参imm动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwcore .mo→kbc"
+    echo "$com_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwcore mo2kbc")
+fi
+
+# ---- hw_main 家族总调度 (2026-09-28) ----
+mn_out=$("$BIN" main 2>&1); mn_rc=$?
+if [ $mn_rc -eq 0 ] && echo "$mn_out" | grep -q "golden : 0x5FAD755A OK" \
+   && echo "$mn_out" | grep -q "\[0\] ASR" && echo "$mn_out" | grep -q "\[7\] TOKEN" \
+   && echo "$mn_out" | grep -q "cls=0x0098" && echo "$mn_out" | grep -q "cls=0x0EFD"; then
+    green "  [PASS] hwmain (类注册表能力卡/黄金校验和/类ID对拍)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwmain (能力卡输出异常 rc=$mn_rc)"
+    echo "$mn_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwmain")
+fi
+
+# hwmain 自检 (黄金锁定/类ID↔表序双向对拍/探针缓存生命周期/命令分发)
+mns_out=$("$BIN" main selftest 2>&1); mns_rc=$?
+if [ $mns_rc -eq 0 ] && echo "$mns_out" | grep -q "all PASS"; then
+    green "  [PASS] hwmain selftest (黄金锁定/双向对拍/探针缓存/命令分发)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwmain selftest (rc=$mns_rc)"
+    echo "$mns_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwmain selftest")
+fi
+
+# hwmain .mo → kbc 端到端: hw_main()内置 → OP_HW_MAIN_CALL → hw_main_cmd
+# 双参 imm 编码: hw_main("probe ", 152) → 拼接 "probe 152" → CORE 探针 0;
+#   (拼接失败则 find 152 落空 → -1 回绕 255, rc=0 即 imm 动态拼接生效铁证)
+mnm_out=$("$BIN" mo2kbc examples/hwmain_test.mo 2>&1)
+if echo "$mnm_out" | grep -q "count rc=8" && echo "$mnm_out" | grep -q "ok    rc=1" \
+   && echo "$mnm_out" | grep -q "sum   rc=1605203290" && echo "$mnm_out" | grep -q "mode  rc=0" \
+   && echo "$mnm_out" | grep -q "idx3  rc=495" && echo "$mnm_out" | grep -q "find  rc=1" \
+   && echo "$mnm_out" | grep -q "probe rc=0" && echo "$mnm_out" | grep -q "idx6v rc=4093"; then
+    green "  [PASS] hwmain .mo→kbc (hw_main()内置+双参imm动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwmain .mo→kbc"
+    echo "$mnm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwmain mo2kbc")
+fi
+
+# =================  hw_wdbg 无线调试器信号层 (2026-09-29) =================
+# 复刻立创开源「AI远程调试器」(ESP32-S3 无线串口调试器) 信号面:
+#   串口桥接(2048B流缓冲/4档波特率/回环) + PWM测频占空比 + SPI捕获(50x64B)
+#   + I2C读写捕获 + 自定义线序; 黄金值 = 默认线序表 FNV-1a-32 0xCD91F641
+wdbg_st=$("$BIN" wdbg selftest 2>&1); wdbg_st_rc=$?
+if [ $wdbg_st_rc -eq 0 ] && echo "$wdbg_st" | grep -q "all PASS" \
+   && echo "$wdbg_st" | grep -q "golden=0xCD91F641"; then
+    green "  [PASS] wdbg selftest (16组: 黄金/线序/波特率/桥接/监控/线序改复位/复位幂等)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] wdbg selftest (rc=$wdbg_st_rc)"
+    echo "$wdbg_st" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg selftest")
+fi
+
+wdbg_card=$("$BIN" wdbg card 2>&1)
+if echo "$wdbg_card" | grep -q "pin cksum = 0xCD91F641 (golden OK)" \
+   && echo "$wdbg_card" | grep -q "bridge RD 4 字节: 4f 4b 0d 0a" \
+   && echo "$wdbg_card" | grep -q "bridge RD 2 字节: 48 49" \
+   && echo "$wdbg_card" | grep -q "pwm MEAS 1000Hz duty=250/1000" \
+   && echo "$wdbg_card" | grep -q "spi XFER mode=3 rx: a4 a7 a6" \
+   && echo "$wdbg_card" | grep -q "i2c RD addr=0x50 4 字节: 50 51 52 53"; then
+    green "  [PASS] wdbg card (线序表/桥接回环/2048B流缓冲/PWM/SPI/I2C 全扇区)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] wdbg card (能力卡输出异常)"
+    echo "$wdbg_card" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg card")
+fi
+
+# 一次性分发: 命中(0x00, exit 0) / 未识别(-1, exit 1)
+wdbg1_out=$("$BIN" wdbg "bridge open 460800" 2>&1); wdbg1_rc=$?
+wdbg2_out=$("$BIN" wdbg "bogus" 2>&1); wdbg2_rc=$?
+if [ $wdbg1_rc -eq 0 ] && echo "$wdbg1_out" | grep -q "bridge OPEN @460800" \
+   && [ $wdbg2_rc -eq 1 ] && echo "$wdbg2_out" | grep -q "NOCMD"; then
+    green "  [PASS] wdbg one-shot (open命中rc=0/exit0, bogus未识别rc=-1/exit1)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] wdbg one-shot (rc1=$wdbg1_rc rc2=$wdbg2_rc)"
+    echo "$wdbg1_out" | sed 's/^/    /'; echo "$wdbg2_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg oneshot")
+fi
+
+# hw_wdbg .mo → kbc 端到端: hw_wdbg()内置 → OP_HW_WDBG_CALL → hw_wdbg_cmd
+# 双参 imm 动态拼接判别性断言 (拼接失败即 rc 变 1/2):
+#   hw_wdbg("pwm inject 1500 ", 300) → "pwm inject 1500 300" → 0
+#   hw_wdbg("spi mode ", 2)          → "spi mode 2"          → 0
+#   hw_wdbg("pin set uart 7 ", 8)    → "pin set uart 7 8"    → 0
+wdm_out=$("$BIN" mo2kbc examples/wdbg_test.mo 2>&1)
+if echo "$wdm_out" | grep -q "count rc=4" && echo "$wdm_out" | grep -q "mode  rc=0" \
+   && echo "$wdm_out" | grep -q "nowr  rc=4" && echo "$wdm_out" | grep -q "badb  rc=2" \
+   && echo "$wdm_out" | grep -q "open  rc=0" && echo "$wdm_out" | grep -q "rd4   rc=0" \
+   && echo "$wdm_out" | grep -q "wr    rc=0" && echo "$wdm_out" | grep -q "rd2   rc=0" \
+   && echo "$wdm_out" | grep -q "baud  rc=0" && echo "$wdm_out" | grep -q "close rc=0" \
+   && echo "$wdm_out" | grep -q "pwm0  rc=4" && echo "$wdm_out" | grep -q "pwm1  rc=0" \
+   && echo "$wdm_out" | grep -q "injv  rc=0" && echo "$wdm_out" | grep -q "spibad rc=2" \
+   && echo "$wdm_out" | grep -q "xfer  rc=0" && echo "$wdm_out" | grep -q "spiv  rc=0" \
+   && echo "$wdm_out" | grep -q "i2cbad rc=2" && echo "$wdm_out" | grep -q "pinbad rc=2" \
+   && echo "$wdm_out" | grep -q "pinsetv rc=0" && echo "$wdm_out" | grep -q "pinrst rc=0" \
+   && echo "$wdm_out" | grep -q "bogus rc=-1"; then
+    green "  [PASS] wdbg .mo→kbc (hw_wdbg()内置+双参imm动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] wdbg .mo→kbc"
+    echo "$wdm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg mo2kbc")
+fi
+
+# =====================================================================
+# hw_flash — ESP32 ROM 下载协议烧录层 (2026-09-30)
+# =====================================================================
+fl_st=$("$BIN" flash selftest 2>&1); fl_st_rc=$?
+if [ $fl_st_rc -eq 0 ] && echo "$fl_st" | grep -q "ALL PASS" \
+   && echo "$fl_st" | grep -q "cmd table FNV-1a-32 == golden" \
+   && echo "$fl_st" | grep -q "md5(4096B image) == golden" \
+   && echo "$fl_st" | grep -q "1-bit wire corruption -> CHECKSUM"; then
+    green "  [PASS] flash selftest (26 项: 黄金/命令表/SLIP/MD5/帧/协议/E2E/负向)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash selftest (rc=$fl_st_rc)"
+    echo "$fl_st" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash selftest")
+fi
+
+fl_card=$("$BIN" flash card 2>&1)
+if echo "$fl_card" | grep -q "黄金 FNV-1a-32 = 0xAF05978A" \
+   && echo "$fl_card" | grep -q "0x13  FLASH_MD5" \
+   && echo "$fl_card" | grep -q "0x14  SEC_INFO" \
+   && echo "$fl_card" | grep -q "simulator (确定性 ROM)"; then
+    green "  [PASS] flash card (命令表/黄金/块尺寸/传输源 全扇区)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash card (能力卡输出异常)"
+    echo "$fl_card" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash card")
+fi
+
+# 端到端烧录 4096B → 设备 MD5 与本地逐位一致 (VERIFIED); bogus 未识别 exit1
+fl1_out=$("$BIN" flash "run 4096" 2>&1); fl1_rc=$?
+fl2_out=$("$BIN" flash bogus 2>&1); fl2_rc=$?
+if [ $fl1_rc -eq 0 ] && echo "$fl1_out" | grep -q "4e328028738d17bb7ff82667d5803369  (VERIFIED)" \
+   && echo "$fl1_out" | grep -q "4 blocks x 1024 B -> 100%" \
+   && [ $fl2_rc -eq 1 ]; then
+    green "  [PASS] flash one-shot (run 4096 命中 MD5 VERIFIED/exit0, bogus 未识别/exit1)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash one-shot (rc1=$fl1_rc rc2=$fl2_rc)"
+    echo "$fl1_out" | sed 's/^/    /'; echo "$fl2_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash oneshot")
+fi
+
+# hw_flash .mo → kbc 端到端: hw_flash()内置 → OP_HW_FLASH_CALL → hw_flash_cmd
+# 双参 imm 动态拼接判别性 + 越界/未识别/help 返回码全覆盖:
+#   hw_flash("run ", 2048) → "run 2048" → 0 ; hw_flash("run 99999") → 6 (BADSIZE)
+flm_out=$("$BIN" mo2kbc examples/flash_test.mo 2>&1)
+if echo "$flm_out" | grep -q "mode  rc=0" && echo "$flm_out" | grep -q "sync  rc=0" \
+   && echo "$flm_out" | grep -q "chip  rc=0" && echo "$flm_out" | grep -q "run4k rc=0" \
+   && echo "$flm_out" | grep -q "run2k rc=0" && echo "$flm_out" | grep -q "runsz rc=6" \
+   && echo "$flm_out" | grep -q "md5   rc=0" && echo "$flm_out" | grep -q "slip  rc=0" \
+   && echo "$flm_out" | grep -q "stat  rc=0" && echo "$flm_out" | grep -q "help  rc=-2" \
+   && echo "$flm_out" | grep -q "bogus rc=-1" \
+   && echo "$flm_out" | grep -q "0cc61b9a600f965b827d59f65cbf9e35  (VERIFIED)"; then
+    green "  [PASS] flash .mo→kbc (hw_flash()内置+双参 imm 动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash .mo→kbc"
+    echo "$flm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash mo2kbc")
+fi
+
+# =====================================================================
+# hw_pin — 引脚档案/双模驱动/编程电压层 (2026-09-30)
+# =====================================================================
+pn_st=$("$BIN" pin selftest 2>&1); pn_st_rc=$?
+if [ $pn_st_rc -eq 0 ] \
+   && echo "$pn_st" | grep -q "T2 golden table OK" \
+   && echo "$pn_st" | grep -q "T5 bit-bang RDID = EF4018 OK" \
+   && echo "$pn_st" | grep -q "T7 page program+verify OK" \
+   && echo "$pn_st" | grep -q "T8 write-protect negative (no WREN) OK" \
+   && echo "$pn_st" | grep -q "T12 unmapped-pin reject OK" \
+   && echo "$pn_st" | grep -q "T13 ISP cmdsum table OK" \
+   && echo "$pn_st" | grep -q "T14 ISP handshake + GetID(0x0410) OK" \
+   && echo "$pn_st" | grep -q "T15 ISP mirror (erase->write256->read) OK" \
+   && echo "$pn_st" | grep -q "T16 ISP no-uart profile reject OK" \
+   && echo "$pn_st" | grep -q "T17 ISP bad-checksum -> NACK OK"; then
+    green "  [PASS] pin selftest (17 项: 黄金/档案/映射/RDID/擦除/编程/写保护负向/电压/无效档案/未映射 + ISP 5 项)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] pin selftest (rc=$pn_st_rc)"
+    echo "$pn_st" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("pin selftest")
+fi
+
+pn_card=$("$BIN" pin card 2>&1)
+if echo "$pn_card" | grep -q "golden=0x9E0F10FA" \
+   && echo "$pn_card" | grep -q "profiles=4" \
+   && echo "$pn_card" | grep -q "MOSI=IO23 MISO=IO19 CK=IO18 CS=IO5" \
+   && echo "$pn_card" | grep -q "isp(AN3155 UART cmdsum=0xD2A9A924)" \
+   && echo "$pn_card" | grep -q "drv=BB"; then
+    green "  [PASS] pin card (档案表/黄金/信号→GPIO 映射 全扇区)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] pin card (能力卡输出异常)"
+    echo "$pn_card" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("pin card")
+fi
+
+# 一次性: wtest 全链 OK/exit0, id 读到 EF4018/exit0, bogus 未识别/exit1
+pn_w=$("$BIN" pin wtest 2>&1); pn_w_rc=$?
+pn_b=$("$BIN" pin bogus 2>&1); pn_b_rc=$?
+pn_id=$("$BIN" pin id 2>&1); pn_id_rc=$?
+if [ $pn_w_rc -eq 0 ] && echo "$pn_w" | grep -q "wtest(256B) -> OK (0)" \
+   && [ $pn_b_rc -eq 1 ] \
+   && [ $pn_id_rc -eq 0 ] && echo "$pn_id" | grep -q "EF 40 18"; then
+    green "  [PASS] pin one-shot (wtest OK/exit0, id=EF4018/exit0, bogus 未识别/exit1)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] pin one-shot (rc w=$pn_w_rc b=$pn_b_rc id=$pn_id_rc)"
+    echo "$pn_w" | sed 's/^/    /'; echo "$pn_id" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("pin oneshot")
+fi
+
+# pin isp 一次性: 命令表黄金/握手对拍/烧录全链/负向 (L3 插件 #2 AN3155)
+pn_isp_chk=$("$BIN" pin isp chk 2>&1); pn_isp_chk_rc=$?
+pn_isp_inf=$("$BIN" pin isp info 2>&1); pn_isp_inf_rc=$?
+pn_isp_wt=$("$BIN" pin isp wtest 2>&1); pn_isp_wt_rc=$?
+if [ $pn_isp_chk_rc -eq 0 ] && echo "$pn_isp_chk" | grep -q "cmdsum=0xD2A9A924 golden=0xD2A9A924 -> OK" \
+   && [ $pn_isp_inf_rc -eq 0 ] \
+   && echo "$pn_isp_inf" | grep -q "ISP ver=0x31 PID=0x0410 cmdsum=0xD2A9A924 (golden=0xD2A9A924)" \
+   && [ $pn_isp_wt_rc -eq 0 ] \
+   && echo "$pn_isp_wt" | grep -q "ISP wtest(256B @0x08000000) -> OK (0)"; then
+    green "  [PASS] pin isp one-shot (AN3155: 握手/GetID 0x0410/命令表黄金/擦写读全链)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] pin isp one-shot (rc chk=$pn_isp_chk_rc inf=$pn_isp_inf_rc wt=$pn_isp_wt_rc)"
+    echo "$pn_isp_inf" | sed 's/^/    /'; echo "$pn_isp_wt" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("pin isp oneshot")
+fi
+
+# hw_pin .mo → kbc 端到端: hw_pin()内置 → OP_HW_PIN_CALL → hw_pin_cmd
+# 双参 imm 动态拼接判别性: hw_pin("vpp ", 3) → "vpp 3" → 12500 mV (拼接失败则落 0 档)
+pnm_out=$("$BIN" mo2kbc examples/pin_test.mo 2>&1)
+if echo "$pnm_out" | grep -q "mode   rc=0" && echo "$pnm_out" | grep -q "profs  rc=0" \
+   && echo "$pnm_out" | grep -q "load   rc=0" && echo "$pnm_out" | grep -q "id     rc=0" \
+   && echo "$pnm_out" | grep -q "wtest  rc=0" && echo "$pnm_out" | grep -q "vpp2   rc=0" \
+   && echo "$pnm_out" | grep -q "vpprd  rc=0" && echo "$pnm_out" | grep -q "vpp3   rc=0" \
+   && echo "$pnm_out" | grep -q "erase  rc=0" && echo "$pnm_out" | grep -q "stat   rc=0" \
+   && echo "$pnm_out" | grep -q "help   rc=-2" && echo "$pnm_out" | grep -q "bogus  rc=-1" \
+   && echo "$pnm_out" | grep -q "VPP set 3 (12500 mV)" \
+   && echo "$pnm_out" | grep -q "RDID -> rc=0 jedec=0x1840EF (EF 40 18)" \
+   && echo "$pnm_out" | grep -q "ispchk rc=0" && echo "$pnm_out" | grep -q "ispinf rc=0" \
+   && echo "$pnm_out" | grep -q "ispwrt rc=0" \
+   && echo "$pnm_out" | grep -q "ISP ver=0x31 PID=0x0410" \
+   && echo "$pnm_out" | grep -q "ISP wtest(256B @0x08000000) -> OK (0)"; then
+    green "  [PASS] pin .mo→kbc (hw_pin()内置+双参 imm 动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] pin .mo→kbc"
+    echo "$pnm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("pin mo2kbc")
+fi
+
+# ---- hw_dc DC 电源信号层 (2026-10-01) ----
+dc_out=$("$BIN" dc 2>&1); dc_rc=$?
+if [ $dc_rc -eq 0 ] && echo "$dc_out" | grep -q "golden OK" \
+   && echo "$dc_out" | grep -q "count=8" \
+   && echo "$dc_out" | grep -q "base IN =0x059  base OUT=0x080" \
+   && echo "$dc_out" | grep -q "DATA_5 = 0x0D9"; then
+    green "  [PASS] hwdc (能力卡/黄金校验和/信号表/参考预值/组合数据帧)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc (能力卡输出异常 rc=$dc_rc)"
+    echo "$dc_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc")
+fi
+
+# hwdc 自检 (黄金锁定/信号表/极值窗口/槽位API/BSP注入/命令分发)
+dcs_out=$("$BIN" dc selftest 2>&1); dcs_rc=$?
+if [ $dcs_rc -eq 0 ] && echo "$dcs_out" | grep -q "all PASS"; then
+    green "  [PASS] hwdc selftest (黄金锁定/信号表/极值窗口/槽位API/BSP注入/命令分发)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc selftest (rc=$dcs_rc)"
+    echo "$dcs_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc selftest")
+fi
+
+# hw_dc .mo → kbc 端到端: hw_dc()内置 → OP_HW_DC_CALL → hw_dc_cmd
+# 双参 imm 动态拼接判别性: hw_dc("data ", 4) → "data 4" → 217 (失败则 0);
+#   hw_dc("base ", 1) → "base 1" → 128 (失败则 89)
+dcm_out=$("$BIN" mo2kbc examples/dc_test.mo 2>&1)
+if echo "$dcm_out" | grep -q "count  rc=8" && echo "$dcm_out" | grep -q "dcount rc=7" \
+   && echo "$dcm_out" | grep -q "ok     rc=1" \
+   && echo "$dcm_out" | grep -q "baseIN rc=89" && echo "$dcm_out" | grep -q "baseOT rc=128" \
+   && echo "$dcm_out" | grep -q "data4  rc=217" && echo "$dcm_out" | grep -q "sig0   rc=42" \
+   && echo "$dcm_out" | grep -q "range0 rc=0" \
+   && echo "$dcm_out" | grep -q "dyn4   rc=217" && echo "$dcm_out" | grep -q "dynB   rc=128" \
+   && echo "$dcm_out" | grep -q "bogus  rc=-1" && echo "$dcm_out" | grep -q "help   rc=-2"; then
+    green "  [PASS] hwdc .mo→kbc (hw_dc()内置+双参 imm 动态拼接 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc .mo→kbc"
+    echo "$dcm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc mo2kbc")
+fi
+
+# ---- hw_dc DCPP 供电协议 (帧层, 2026-10-01) ----
+# 协议黄金 0x9432D6A5 (独立 Python 对拍) / 9 命令 / START(80 EF 02)..END(ED FF 0D)
+dcp_out=$("$BIN" dc proto card 2>&1); dcp_rc=$?
+if [ $dcp_rc -eq 0 ] && echo "$dcp_out" | grep -q "cksum= 0x9432D6A5 (golden OK)" \
+   && echo "$dcp_out" | grep -q "cmds=9" \
+   && echo "$dcp_out" | grep -q "count=9" \
+   && echo "$dcp_out" | grep -q "PING   frame=11" \
+   && echo "$dcp_out" | grep -q "hex=80EF020100010010EDFF0D"; then
+    green "  [PASS] hwdc proto card (协议黄金/9命令/帧定界/打帧字节级)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc proto card (rc=$dcp_rc)"
+    echo "$dcp_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc proto card")
+fi
+
+# 会话门禁 + 一条龙: 复位→OPEN→会话内含 6 命令→CLOSE; 9 帧全成帧 err=0
+dcpl_out=$("$BIN" dc proto loop 2>&1); dcpl_rc=$?
+if [ $dcpl_rc -eq 0 ] && echo "$dcpl_out" | grep -q "ALL FRAMED  rx=9 tx=9 err=0 last=CLOSE"; then
+    green "  [PASS] hwdc proto loop (会话门禁: 复位/OPEN/会话内命令/CLOSE 一条龙 9帧 err=0)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc proto loop (rc=$dcpl_rc)"
+    echo "$dcpl_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc proto loop")
+fi
+
+# 单命令: run 8 (OPEN) 命中 成帧 rc=1 / opened=1
+dcpr_out=$("$BIN" dc proto run 8 2>&1); dcpr_rc=$?
+if [ $dcpr_rc -eq 0 ] && echo "$dcpr_out" | grep -q "run OPEN  rc=1  opened=1"; then
+    green "  [PASS] hwdc proto run (单命令 OPEN 成帧 rc=1/opened=1)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc proto run (rc=$dcpr_rc)"
+    echo "$dcpr_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc proto run")
+fi
+
+# hw_dc DCPP .mo → kbc 端到端: hw_dc("proto*")内置 → OP_HW_DC_CALL → hw_dc_cmd
+# 判别性: 帧长公式(0→11/16→27/17→-1) + 会话门禁(GETx=-7) + OPEN/CLOSE opened 翻转
+#         + 应答值(DATA→217 / PING→80) + 双参 imm 动态拼接(protobuild 1→11)
+dcpm_out=$("$BIN" mo2kbc examples/dc_proto_test.mo 2>&1)
+if echo "$dcpm_out" | grep -q "ver    rc=1" && echo "$dcpm_out" | grep -q "count  rc=9" \
+   && echo "$dcpm_out" | grep -q "ok     rc=1" \
+   && echo "$dcpm_out" | grep -q "fr0    rc=11" && echo "$dcpm_out" | grep -q "fr16   rc=27" \
+   && echo "$dcpm_out" | grep -q "fr17   rc=-1" \
+   && echo "$dcpm_out" | grep -q "bPING  rc=11" && echo "$dcpm_out" | grep -q "bGET   rc=12" \
+   && echo "$dcpm_out" | grep -q "GETx   rc=-7" \
+   && echo "$dcpm_out" | grep -q "OPEN   rc=1" && echo "$dcpm_out" | grep -q "opened rc=1" \
+   && echo "$dcpm_out" | grep -q "value  rc=217" && echo "$dcpm_out" | grep -q "pong   rc=80" \
+   && echo "$dcpm_out" | grep -q "CLOSE  rc=1" && echo "$dcpm_out" | grep -q "opened rc=0" \
+   && echo "$dcpm_out" | grep -q "GETx2  rc=-7" && echo "$dcpm_out" | grep -q "dynB   rc=11"; then
+    green "  [PASS] hwdc proto .mo→kbc (帧层协议+会话门禁+应答值+双参 imm 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] hwdc proto .mo→kbc"
+    echo "$dcpm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("hwdc proto mo2kbc")
+fi
+
+# ---- hw_dmc DMC 主从链路协议层 (第十一位 hw 家族成员, 2026-10-01) ----
+# 黄金 0x169A603E (独立 Python 对拍) / 9 命令 / 7 状态 / 8 错误码
+# 帧 = SYNC0|SYNC1|LEN|CMD|PAYLOAD|CRC_LO|CRC_HI, CRC16-CCITT 统一 (原三份文件两份互不兼容)
+# 三份原始资料"一字不改"归档在 src/hw/hw_dmc_base.c, 由 tools/dmc_verbatim_check.py 反解校验
+dmc_out=$("$BIN" dmc selftest 2>&1); dmc_rc=$?
+if [ $dmc_rc -eq 0 ] && echo "$dmc_out" | grep -q "DMC selftest: ALL PASS (fails=0)"; then
+    green "  [PASS] dmc selftest (26 项: 黄金/CRC向量/帧往返/先校验后索引/上界/保BSP/握手/半双工/双参拼接/草稿API·NACK·长度出参)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] dmc selftest (rc=$dmc_rc)"
+    echo "$dmc_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc selftest")
+fi
+
+# 能力卡: 命令表 / 状态表 / 黄金 / 帧布局 / CRC 标准向量 / HELLO 打包往返
+dmcc_out=$("$BIN" dmc cmds 2>&1); dmcs_out=$("$BIN" dmc states 2>&1)
+dmcg_out=$("$BIN" dmc golden 2>&1); dmcf_out=$("$BIN" dmc frame 2>&1)
+dmcv_out=$("$BIN" dmc crcvec 2>&1); dmch_out=$("$BIN" dmc hello 2>&1)
+if echo "$dmcc_out" | grep -q "01 HELLO" && echo "$dmcc_out" | grep -q "0F NACK" \
+   && [ "$(echo "$dmcc_out" | grep -c '^  0')" -eq 9 ] \
+   && echo "$dmcs_out" | grep -q "5 ESTABLISHED" && echo "$dmcs_out" | grep -q "6 ERROR" \
+   && [ "$(echo "$dmcs_out" | grep -c '^  [0-6] ')" -eq 7 ] \
+   && echo "$dmcg_out" | grep -q "golden=0x169A603E expect=0x169A603E OK" \
+   && echo "$dmcf_out" | grep -q "min=6 max=255 max_payload=249" \
+   && echo "$dmcf_out" | grep -q "实测: HELLO(8B payload) pack = 14 B" \
+   && echo "$dmcv_out" | grep -q 'crc("123456789")=0x29B1 expect=0x29B1' \
+   && echo "$dmch_out" | grep -q "pack len=14 unpack rc=0 cmd=HELLO plen=8 match=1"; then
+    green "  [PASS] dmc card (命令表9/状态表7/黄金/帧布局/CRC标准向量0x29B1/HELLO打包往返)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] dmc card"
+    for o in "$dmcc_out" "$dmcs_out" "$dmcg_out" "$dmcf_out" "$dmcv_out" "$dmch_out"; do echo "$o" | sed 's/^/    /'; done
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc card")
+fi
+
+# one-shot: 合法命中 rc=0/exit0; 未识别命令本地就拒 rc=255/exit1 (不上网=不会变成"发了个别的")
+"$BIN" dmc count >/dev/null 2>&1; dmc_ok=$?
+"$BIN" dmc boguszzz >/dev/null 2>&1; dmc_bad=$?
+if [ $dmc_ok -eq 0 ] && [ $dmc_bad -eq 255 ]; then
+    green "  [PASS] dmc one-shot (count 命中 exit0, bogus 未识别 exit255)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] dmc one-shot (ok=$dmc_ok bad=$dmc_bad)"
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc one-shot")
+fi
+
+# 归档完整性: 三份原始资料"一字不改" (按哨兵反解 → 与 tests/dmc_orig 逐字节 diff)
+if command -v python3 >/dev/null 2>&1; then
+    vbc_out=$(python3 tools/dmc_verbatim_check.py 2>&1)
+    if echo "$vbc_out" | grep -q "VERBATIM OK (3/3 一字未改)"; then
+        green "  [PASS] dmc verbatim (三份原始资料一字未改: 伪代码底稿/handshake/porto)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] dmc verbatim"
+        echo "$vbc_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc verbatim")
+    fi
+else
+    echo "  [SKIP] dmc verbatim (缺 python3)"
+fi
+
+# hw_dmc .mo → kbc 端到端: hw_dmc()内置 → OP_HW_DMC_CALL → hw_dmc_cmd
+# 判别性: 单参常量(count/golden/状态/错误码) + 双参 imm 动态拼接(add/sub/mul 真参与运算
+#         → 109/91/498, 证明数值不是被静默忽略) + 负向诚实失败(overflow/badpfx=-1, help=-2, zzz=-1)
+dmcm_out=$("$BIN" mo2kbc examples/dmc_test.mo 2>&1)
+if echo "$dmcm_out" | grep -q "count    rc=9" && echo "$dmcm_out" | grep -q "golden   rc=379215934" \
+   && echo "$dmcm_out" | grep -q "ok       rc=1" && echo "$dmcm_out" | grep -q "states   rc=7" \
+   && echo "$dmcm_out" | grep -q "errs     rc=8" && echo "$dmcm_out" | grep -q "maxpay   rc=249" \
+   && echo "$dmcm_out" | grep -q "maxframe rc=255" && echo "$dmcm_out" | grep -q "crcvec   rc=1" \
+   && echo "$dmcm_out" | grep -q "hello    rc=1" \
+   && echo "$dmcm_out" | grep -q "add100  rc=109" && echo "$dmcm_out" | grep -q "sub100  rc=91" \
+   && echo "$dmcm_out" | grep -q "mul2    rc=498" && echo "$dmcm_out" | grep -q "num7    rc=7" \
+   && echo "$dmcm_out" | grep -q "overflow rc=-1" && echo "$dmcm_out" | grep -q "badpfx  rc=-1" \
+   && echo "$dmcm_out" | grep -q "help     rc=-2" && echo "$dmcm_out" | grep -q "zzz      rc=-1"; then
+    green "  [PASS] dmc .mo→kbc (单参+双参imm动态拼接+负向诚实失败 六层全链路)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] dmc .mo→kbc"
+    echo "$dmcm_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc mo2kbc")
+fi
+
+# 全跨矩阵 + ⭐黄金锁 (2026-10-01 接入回归网)
+#   为什么必须自动跑: 矩阵原是孤儿脚本(全库无调用), 六模式指纹全靠人肉记得手动跑。
+#   而它只验 C11==C++17 自一致, 从不与记录比对 ⇒ 源码一改, 知识页指纹静默腐烂
+#   (本页已作废三次)。加第 5 项黄金锁后, 腐烂成为 FAIL; 但若不自动跑, 依旧靠人记得。
+#   代价: 约 19s (本回归 4.2s → 约 24s)。可用 XIAOMO_SKIP_MATRIX=1 关闭。
+if [ "${XIAOMO_SKIP_MATRIX:-0}" = "1" ]; then
+    echo "  [SKIP] dmc matrix+golden (XIAOMO_SKIP_MATRIX=1)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+    echo "  [SKIP] dmc matrix+golden (缺 cc/c++)"
+else
+    dmcmx_out=$(bash tools/dmc_matrix.sh 2>&1); dmcmx_rc=$?
+    # 不写死 PASS=N (加检查项就会自伤), 只判: 退出码 0 且 FAIL 数为 0 且黄金锁通过
+    dmcmx_fail=$(echo "$dmcmx_out" | sed -n 's/.*全跨矩阵: PASS=[0-9]* FAIL=\([0-9]*\).*/\1/p' | tail -1)
+    if [ $dmcmx_rc -eq 0 ] && [ "${dmcmx_fail:-1}" = "0" ] \
+       && echo "$dmcmx_out" | grep -q "7 项指纹与记录逐位一致"; then
+        green "  [PASS] dmc matrix+golden (全跨 16 项: C11==C++17/六模式 override/双交叉 freestanding/⭐黄金锁 7 指纹未漂移)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] dmc matrix+golden (rc=$dmcmx_rc 矩阵FAIL数=${dmcmx_fail:-?})"
+        echo "$dmcmx_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc matrix+golden")
+    fi
+fi
+
 
 echo ""
 echo "================  汇总 ================"

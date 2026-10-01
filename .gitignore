@@ -30,6 +30,9 @@ vframes*/
 *.npy
 *.npz
 
+# 工程内临时产物（3.4M+，绝不入库）
+tmp/
+
 # Linux 磁盘镜像与备份（76MB+，不入库）
 linux/diskimage-linux-riscv-2018-09-23/*.bin
 *.bak-*
