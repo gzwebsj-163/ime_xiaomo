@@ -11,8 +11,8 @@ CFLAGS = -Wall -std=c++17 -g -Iinclude -Isrc/core/ch340
 CXXFLAGS = $(CFLAGS)
 
 # 源文件
-C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/tensor.c src/nd_tensor.c src/weights.c src/main.c
-HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c src/hw/hw_oem.c src/hw/hw_hex.c src/hw/hw_dev.c src/hw/hw_token.c src/hw/hw_asr.c src/infer.c src/hw/hw_fault.c src/hw/hw_core.c
+C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/tensor.c src/nd_tensor.c src/weights.c src/debug_tool.c src/main.c
+HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c src/hw/hw_oem.c src/hw/hw_hex.c src/hw/hw_dev.c src/hw/hw_token.c src/hw/hw_asr.c src/infer.c src/hw/hw_fault.c src/hw/hw_core.c src/hw/hw_main.c src/hw/hw_wdbg.c src/hw/hw_flash.c src/hw/hw_pin.c src/hw/hw_dc.c src/hw/hw_dmc.c src/hw/hw_dmc_base.c
 CORE_SRCS = src/core/mc12026a.c
 CPP_SRCS =
 
@@ -29,6 +29,12 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread -framework IOKit -framework CoreFoundation
 
+# xdebugd —— 调试软件 (持久会话守护进程 + Web 工作台), 排除 main.o (自有 main)
+DAEMON_OBJS = $(filter-out src/main.o,$(OBJS)) src/debug_daemon.o
+
+xdebugd: $(DAEMON_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread -framework IOKit -framework CoreFoundation
+
 # 所有源统一 g++ 编译
 %.o: %.c
 	$(CXX) $(CXXFLAGS) -x c++ -c $< -o $@
@@ -41,6 +47,6 @@ test: $(TARGET)
 	@bash tests/run_tests.sh
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) src/debug_daemon.o $(TARGET) xdebugd
 
 .PHONY: all clean test
