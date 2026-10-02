@@ -558,7 +558,17 @@ static char          g_err[96];
 static int pin_gpio_write_raw(int gpio, int level)
 {
     if (gpio < 0) return HW_PIN_R_NODEV;
-    if (g_bsp.gpio_write) return (g_bsp.gpio_write(gpio, level) == 0) ? 0 : -1;
+    /* 🕳️ 2026-10-02 修: 统计点必须覆盖**所有成功路径**。
+     *   原先 vex++ 落在 BSP 早退 return 之后 ⇒ 一旦真机装了 gpio_write,
+     *   每次写引脚都从那条 return 走掉, vex 恒为 0, `pin stat` 显示
+     *   「一次都没写过引脚」—— 观测口与事实相反 (静默说谎)。
+     *   语义: vex = 累计引脚电平写次数, 模拟路径与硬件路径同等对待。
+     *   参数非法(gpio<0)不算执行, 仍不计数。 */
+    if (g_bsp.gpio_write) {
+        int r = (g_bsp.gpio_write(gpio, level) == 0) ? 0 : -1;
+        g_stat.vex++;
+        return r;
+    }
     if (gpio < PIN_GPIO_MAX) g_gpio_lvl[gpio] = (level != 0) ? 1 : 0;
     g_stat.vex++;
     return 0;
@@ -1451,6 +1461,7 @@ static int pin_puts_null(const char* s) { (void)s; return 0; }
 
 /* T18 用的哨兵读桩: 只要返回一个不可能来自模拟电平状态机的值即可 */
 static int pin_selftest_sentinel_read(int pin) { (void)pin; return 0x5A5A; }
+static int pin_selftest_sentinel_write(int pin, int level) { (void)pin; (void)level; return 0; }
 
 int hw_pin_selftest(int (*putf)(const char*))
 {
@@ -1697,6 +1708,36 @@ int hw_pin_selftest(int (*putf)(const char*))
         if (g_bsp.gpio_read != pin_selftest_sentinel_read) {
             fails++; putf("  T18 init must keep BSP FAIL\n");
         } else putf("  T18 init keeps BSP OK\n");
+    }
+
+    /* T19 ★ 硬件路径也必须累计 vex（观测口不能说谎）
+     *
+     *   g_stat.vex = 累计引脚电平写次数, `pin stat` 直接把它打给运维看。
+     *   原实现把 vex++ 放在 BSP 早退 return **之后** ⇒ 真机装了 gpio_write
+     *   之后每写一次都从那条 return 走掉, vex 恒为 0。观测口显示
+     *   "一次都没写过引脚", 与事实相反 —— 正是「验证工具/观测口静默说谎」。
+     *   🕳️ 陷阱: 统计点必须覆盖**所有成功路径**, 而不是只覆盖模拟器那条。
+     *   同一文件的 spi_bytes 就写对了 (HW 643 / BB 662 两条都计), 唯独这里漏。
+     *
+     *   判别: 装 gpio_write stub → 写一次 → vex 必须 +1。 */
+    {
+        hw_pin_bsp_t probe;
+        uint32_t before, after;
+        memset(&probe, 0, sizeof(probe));
+        probe.gpio_write = pin_selftest_sentinel_write;
+        g_bsp = probe;
+        (void)hw_pin_profile_load_name("w25q");
+        before = g_stat.vex;
+        (void)hw_pin_gpio_write(HW_PIN_MOSI, 1);   /* 走 BSP 硬件路径 */
+        after = g_stat.vex;
+        if (after != before + 1u) {
+            char line[96];
+            fails++;
+            snprintf(line, sizeof(line), "  T19 vex on HW path FAIL before=%u after=%u\n",
+                     (unsigned)before, (unsigned)after);
+            putf(line);
+        } else putf("  T19 vex counts hardware path OK\n");
+        (void)hw_pin_profile_load(NULL);
     }
 
     hw_pin_init(NULL);
