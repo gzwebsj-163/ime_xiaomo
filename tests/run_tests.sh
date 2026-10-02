@@ -415,6 +415,65 @@ else
     FAIL=$((FAIL+1)); FAILED_NAMES+=("flash oneshot")
 fi
 
+# CLI 空间隔参数 (2026-10-02 新增, 修复前静默跑错量级)
+#   家族坑 #9「argv 下标」同源变体: hw_flash_cli 过去只取 argv[2],
+#   `./xiaomo flash run 2048` 被截成 "run" → fl_cmd_run(0) → 悄悄烧 4096B,
+#   输出还写"镜像 4096 B"无任何警告 —— 用户以为烧了 2048, 实际烧了 4096。
+#   注意: .mo 侧 hw_flash("run ", 2048) 早就在测(见下方 mo2kbc 块),
+#   唯独 CLI 的空格分隔写法没测 ⇒ 测试恰好绕开了这个 bug, 这本身就是教训。
+# 判别法: 用非 4096 的尺寸(2048/1024), 若参数被吞则一律输出 4096。
+flsp_out=$("$BIN" flash run 2048 2>&1); flsp_rc=$?
+flbad_out=$("$BIN" flash run abc 2>&1); flbad_rc=$?
+flbig_out=$("$BIN" flash run 99999 2>&1); flbig_rc=$?
+if echo "$flsp_out" | grep -q "镜像 2048 B" && [ $flsp_rc -eq 0 ] \
+   && echo "$flbad_out" | grep -q "bad size" && [ $flbad_rc -ne 0 ] \
+   && echo "$flbig_out" | grep -q "model cap" && [ $flbig_rc -ne 0 ]; then
+    green "  [PASS] flash CLI 空格参数 (run 2048 尺寸生效/错尺寸非0/超容量非0)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash CLI 空格参数 (rc=$flsp_rc/$flbad_rc/$flbig_rc)"
+    echo "$flsp_out" | sed 's/^/    /'
+    echo "$flbad_out" | sed 's/^/    /'
+    echo "$flbig_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash cli 空格参数")
+fi
+
+# A-3 verify 假成功 (2026-10-02 新增)。修复前四重缺陷, 全部实测坐实:
+#   ① fl_req(MD5, NULL, 0) 校验的是"空区间"          ② 从不比较 rbody 与本地 MD5
+#   ③ return rc (协议层 OK 即 0) ⇒ 不匹配也"成功"    ④ hex 解码遇大写走错分支
+#   修复前签名: `flash: verify -> rc=0 md5_match=0` 且 **退出码 0** —— 自相矛盾。
+#
+# ⚠️ 判别力的来源是"**签名 + 退出码**"两条同时成立:
+#   只断言"rc != 0"太弱(任何失败都满足); 只断言输出太弱(措辞会变)。
+#   `md5_match=` 是修复前独有的陈旧打印, rc=0 是修复前独有的假成功 —— 两条合起来
+#   才把"旧行为"和"新行为"切开。注意本地 rc 用 $(...) 捕获, 绝不过管道
+#   (管道末端 sed 的码会覆盖真码, 这是本项目第三次踩)。
+#
+# 🕳️ 局限声明(必须诚实): 模拟器下 verify 永远诚实失败(rc=4), 因为设备模型
+#   g_model 是**进程内 static**, 而 run/verify 是两个独立进程 ⇒ 跨进程必读空。
+#   所以本测试锁的是"**不许假成功**", 不是"能 MATCH"。真机 MATCH 需另安排。
+#   连带锁住的还有越界读: 修复前 verify 传 addr=0x10000 而 g_model 仅 32768B
+#   ⇒ 越界读 32KB 之外的相邻内存, 会吐出一个"随机但看起来合法"的 MD5。
+flv_out=$("$BIN" flash verify 2048 2>&1); flv_rc=$?
+flvbad_out=$("$BIN" flash verify abc 2>&1); flvbad_rc=$?
+flvbig_out=$("$BIN" flash verify 99999 2>&1); flvbig_rc=$?
+flvzero_out=$("$BIN" flash verify 0 2>&1); flvzero_rc=$?
+# verify 0 必须被拒(不猜量级, A-0 教训) ; 99999 报 model cap ; abc 报 bad size
+if [ $flv_rc -ne 0 ] && ! echo "$flv_out" | grep -q "md5_match=" \
+   && [ $flvbad_rc -eq 2 ] && echo "$flvbad_out" | grep -q "bad size" \
+   && [ $flvbig_rc -eq 6 ] && echo "$flvbig_out" | grep -q "model cap" \
+   && [ $flvzero_rc -ne 0 ] && echo "$flvzero_out" | grep -q "bad size"; then
+    green "  [PASS] flash verify 无假成功 (rc≠0/无陈旧 md5_match/错参非0/超容量6/零值拒)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] flash verify 无假成功 (rc=$flv_rc/$flvbad_rc/$flvbig_rc/$flvzero_rc)"
+    echo "$flv_out" | sed 's/^/    /'
+    echo "$flvbad_out" | sed 's/^/    /'
+    echo "$flvbig_out" | sed 's/^/    /'
+    echo "$flvzero_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("flash verify 无假成功")
+fi
+
 # hw_flash .mo → kbc 端到端: hw_flash()内置 → OP_HW_FLASH_CALL → hw_flash_cmd
 # 双参 imm 动态拼接判别性 + 越界/未识别/help 返回码全覆盖:
 #   hw_flash("run ", 2048) → "run 2048" → 0 ; hw_flash("run 99999") → 6 (BADSIZE)
@@ -736,8 +795,29 @@ else
     fi
 fi
 
+# hw_wdbg 全跨矩阵 (2026-10-02 接入)
+#   为什么必须有: wdbg 一直只靠本回归里的宿主 C++17 一条腿, 从未在 C11 形态下
+#   编译过。本轮把 g_bsp 由「指针」改成「结构体 + g_bsp_set」= 数据结构改动,
+#   而数据结构改动正是 C 形态/交叉编译的风险区 (锚点: 自证工具与被测物共享盲点)。
+#   同样不能是孤儿脚本 —— dmc 那条注释已记过这个坑, 不重复犯。
+if [ "${XIAOMO_SKIP_MATRIX:-0}" = "1" ]; then
+    echo "  [SKIP] wdbg matrix (XIAOMO_SKIP_MATRIX=1)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+    echo "  [SKIP] wdbg matrix (缺 cc/c++)"
+else
+    wdmx_out=$(bash tools/wdbg_matrix.sh 2>&1); wdmx_rc=$?
+    # 同样不写死 PASS=N, 只判退出码 (脚本以 FAIL 数作退出码)
+    if [ $wdmx_rc -eq 0 ]; then
+        green "  [PASS] wdbg matrix (全跨 15 项: C11==C++17 逐位一致/六模式 override+⭐六模式行为对拍/双交叉 freestanding)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] wdbg matrix (rc=$wdmx_rc)"
+        echo "$wdmx_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg matrix")
+    fi
+fi
 
-echo ""
+
 echo "================  汇总 ================"
 echo "  通过: $PASS   失败: $FAIL"
 if [ $FAIL -gt 0 ]; then

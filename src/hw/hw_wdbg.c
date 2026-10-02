@@ -172,8 +172,15 @@ static uint32_t g_trace_total;    /* 累计推入条数 (含被覆盖) */
 static hw_wdbg_stat_t g_st;
 static uint8_t  g_spi_mode;       /* SPI 当前 Mode (0..3) */
 
-/* ---- BSP ---- */
-static const hw_wdbg_bsp_t* g_bsp;      /* NULL = 用默认模拟器 */
+/* ---- BSP ----
+ * ⚠️ 存**静态副本**, 不存调用方指针 —— 与 hw_flash / hw_dc / hw_pin /
+ *    hw_dmc / hw_fault 完全一致。2026-10-02 修: 原为 `g_bsp = bsp;`
+ *    只留指针, 调用方传栈上临时体时 install 返回即悬垂 (selftest [18]
+ *    判别式 + 编译器 -Wreturn-stack-address 双向实证)。
+ *    真机固件传的是 static const 全局, 故修前「恰好」不炸 ——
+ *    属契约脆弱无现行触发点, 靠人工审阅必然漏判。 */
+static hw_wdbg_bsp_t   g_bsp;             /* 全零 = 用默认模拟器 */
+static int             g_bsp_set;         /* 0 = 未装 (走 g_sim_bsp) */
 
 /* ---- 注入用确定值 (模拟器侧可编排, 便于 selftest/回归) ---- */
 static uint32_t g_inj_pwm_hz;
@@ -277,7 +284,7 @@ static const hw_wdbg_bsp_t g_sim_bsp = {
 /* 取当前 BSP (注入优先, 否则模拟器) */
 static const hw_wdbg_bsp_t* wd_bsp(void)
 {
-    return (g_bsp != NULL) ? g_bsp : &g_sim_bsp;
+    return g_bsp_set ? &g_bsp : &g_sim_bsp;
 }
 
 /* selftest 专用 stub: 只用来占位一个「已装 BSP」的非空槽位, 不参与判定逻辑 */
@@ -421,7 +428,11 @@ void hw_wdbg_stat(hw_wdbg_stat_t* out)
  * ============================================================ */
 void hw_wdbg_hook(void* arg) { (void)arg; }
 
-void hw_wdbg_bsp_install(const hw_wdbg_bsp_t* bsp) { g_bsp = bsp; }
+void hw_wdbg_bsp_install(const hw_wdbg_bsp_t* bsp)
+{
+    if (bsp) { g_bsp = *bsp; g_bsp_set = 1; }   /* 拷成静态副本 (勿存调用方栈指针) */
+    else     { memset(&g_bsp, 0, sizeof(g_bsp)); g_bsp_set = 0; }
+}
 
 void hw_wdbg_init(void* arg)
 {
@@ -441,7 +452,7 @@ void hw_wdbg_init(void* arg)
      *   BSP = 真机 UART/SPI/I2C/PWM 收发回调绑定, 属「环境」而非本模块状态。
      *   上电复位只清桥接/流缓冲/事务/线序/统计(旧状态不跨运行残留), 硬件绑定保持。
      *   真机陷阱: kvm_run 上电会自动调 hw_wdbg_init (vm_core.c:472), CLI 入口
-     *   也先 init 一次 —— 若此处 g_bsp=NULL, 真机绑定会被悄悄换回确定性模拟器,
+     *   也先 init 一次 —— 若此处清掉 g_bsp_set, 真机绑定会被悄悄换回确定性模拟器,
      *   命令照样返回 OK, 但压根没碰硬件 (典型假成功)。
      *   卸载硬件只走 hw_wdbg_bsp_install(NULL)。
      *   回归证据: selftest [17] 断言 init 后 BSP 仍在。 */
@@ -821,6 +832,32 @@ int hw_wdbg_cmd(const char* cmd, void* ctx)
  * ============================================================ */
 #define WDBG_CHECK(cond) do { if (!(cond)) fails++; } while (0)
 
+/* ---- [18] 判别性实验: 证明 bsp_install 若只存指针则必然悬垂 ----
+ * 刻意「不」加 noinline/优化屏障以外的花招: 就是要让栈真的被复用。 */
+static hw_wdbg_bsp_t* wd_install_stack_bsp(void)
+{
+    hw_wdbg_bsp_t local;                 /* ★ 栈上临时体, 返回即失效 */
+    memset(&local, 0, sizeof(local));
+    local.uart_write = wd_stub_uart_write;
+    return &local;
+}
+
+/* 占掉同一片栈并写满垃圾 (深度 + 广度都盖住, 逼编译器真发栈) */
+static volatile uint32_t g_clobber_sink;
+static void wd_clobber_stack(void)
+{
+    uint8_t junk[512];
+    uint32_t i;
+    for (i = 0; i < sizeof(junk); i++) junk[i] = (uint8_t)(0xA5u ^ i);
+    for (i = 0; i < 8u; i++) {
+        volatile uint8_t deep[384];
+        uint32_t k;
+        for (k = 0; k < sizeof(deep); k++) deep[k] = (uint8_t)(0x5Au ^ k);
+        g_clobber_sink = deep[7];
+    }
+    g_clobber_sink = junk[3];
+}
+
 int hw_wdbg_selftest(int (*putf)(const char*))
 {
     int fails = 0;
@@ -949,7 +986,7 @@ int hw_wdbg_selftest(int (*putf)(const char*))
     /* [17] 🔴 A-5 同款: init 不得抹掉已装的 BSP
      *   与 hw_dc / hw_pin / hw_flash / hw_fault 同一类的假成功陷阱:
      *   kvm_run 上电会自动调 hw_wdbg_init (vm_core.c:472), 且 CLI 入口
-     *   也先 init 一次。若此处 g_bsp=NULL, 真机固件装好的 UART/SPI/I2C
+     *   也先 init 一次。若此处清掉 g_bsp_set, 真机固件装好的 UART/SPI/I2C
      *   绑定会被悄悄换回确定性模拟器 —— 命令照样 OK, 但没碰硬件。
      *   契约: init 只复位**本模块**状态(流缓冲/事务/线序/统计),
      *   硬件绑定只由 hw_wdbg_bsp_install() 改, 卸载 = 传 NULL。 */
@@ -959,8 +996,16 @@ int hw_wdbg_selftest(int (*putf)(const char*))
         probe.uart_write = wd_stub_uart_write;   /* 只占位一个非空槽位即可判别 */
         hw_wdbg_bsp_install(&probe);
         hw_wdbg_init(NULL);                      /* 模拟 kvm_run 上电自动调用 */
-        WDBG_CHECK(g_bsp != NULL && g_bsp->uart_write == wd_stub_uart_write);
+        WDBG_CHECK(g_bsp_set && g_bsp.uart_write == wd_stub_uart_write);
         hw_wdbg_bsp_install(NULL);
+        /* [17b] 🔴 卸载必须真的回到默认模拟器
+         *   反向缺口: 原 selftest 只断言「装上去没被 init 抹掉」, 断完
+         *   install(NULL) 就不再看一眼。若卸载路径忘了清 g_bsp_set
+         *   (C 形态下尤易发生), 真机退出诊断后仍挂着已卸载的硬件绑定 ——
+         *   下一个阶段跑出来的"结果"其实是旧绑定的残留, 静默说谎。
+         *   判别: 卸载后必须 !g_bsp_set, 且 wd_bsp() 须指回 g_sim_bsp。 */
+        WDBG_CHECK(!g_bsp_set);
+        WDBG_CHECK(wd_bsp() == &g_sim_bsp);
     }
 
     /* [16] init 幂等复位 (旧状态不跨运行残留) */
@@ -970,6 +1015,27 @@ int hw_wdbg_selftest(int (*putf)(const char*))
     {
         const hw_wdbg_pin_t* a = hw_wdbg_pin_active(HW_WDBG_PROTO_SPI);
         WDBG_CHECK(a != NULL && a->pins[0] == 12u);
+    }
+
+    /* [18] 🔴 bsp_install 必须拷静态副本, 不能存调用方指针
+     *   其余 5 个 hw 模块一律 `g_bsp = *bsp;` (hw_flash:668 / hw_dc:207 /
+     *   hw_pin:1192 / hw_dmc:374 / hw_fault:176), hw_dc 甚至明写
+     *   「拷成静态副本 (勿存调用方栈指针)」。hw_wdbg 独家 `g_bsp = bsp;`
+     *   只留指针 —— 调用方传栈上临时体时, install 返回即悬垂。
+     *   判别式: 装栈上 BSP → 该函数返回 → 另一个占掉同一片栈的函数跑一遍
+     *   → 回读 g_bsp->uart_write 是否还是原值。被踩 = 悬垂已发生。
+     *   注: 真机固件 hw_wdbg_diag.c:141 传的是 static const 全局, 故现网
+     *   「恰好」不炸 —— 契约脆弱但无现行触发点, 靠人工审阅极易漏判。 */
+    {
+        int (*saved_wp)(const uint8_t*, uint32_t);
+        hw_wdbg_bsp_t* p_local = wd_install_stack_bsp();
+        hw_wdbg_bsp_install(p_local);
+        saved_wp = g_bsp.uart_write;
+        wd_clobber_stack();                      /* 占掉刚才那片栈 */
+        /* 拷副本的实现: g_bsp 是静态副本, 必仍是 saved_wp
+         * 存指针的实现: 那片栈已被踩, g_bsp.uart_write 变成别的东西 → != saved_wp */
+        WDBG_CHECK(g_bsp_set && g_bsp.uart_write == saved_wp);
+        hw_wdbg_bsp_install(NULL);
     }
 
     if (fails == 0) {
