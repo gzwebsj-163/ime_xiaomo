@@ -280,6 +280,10 @@ static const hw_wdbg_bsp_t* wd_bsp(void)
     return (g_bsp != NULL) ? g_bsp : &g_sim_bsp;
 }
 
+/* selftest 专用 stub: 只用来占位一个「已装 BSP」的非空槽位, 不参与判定逻辑 */
+static int wd_stub_uart_write(const uint8_t* d, uint32_t n)
+{ (void)d; return (int)n; }
+
 /* ============================================================
  * 6. 小工具: 结果文本 / 分词 / hex 编解码
  * ============================================================ */
@@ -433,7 +437,14 @@ void hw_wdbg_init(void* arg)
     g_inj_pwm_hz = 0; g_inj_pwm_duty = 0;
     g_ts_us = 0;
     g_spi_mode = 0u;
-    g_bsp = NULL;                       /* 还原默认模拟器 (旧注入不跨运行残留) */
+    /* ⚠️ 有意「不」清 g_bsp (2026-10-02 修, 与 hw_dc / hw_pin / hw_flash / hw_fault 同款):
+     *   BSP = 真机 UART/SPI/I2C/PWM 收发回调绑定, 属「环境」而非本模块状态。
+     *   上电复位只清桥接/流缓冲/事务/线序/统计(旧状态不跨运行残留), 硬件绑定保持。
+     *   真机陷阱: kvm_run 上电会自动调 hw_wdbg_init (vm_core.c:472), CLI 入口
+     *   也先 init 一次 —— 若此处 g_bsp=NULL, 真机绑定会被悄悄换回确定性模拟器,
+     *   命令照样返回 OK, 但压根没碰硬件 (典型假成功)。
+     *   卸载硬件只走 hw_wdbg_bsp_install(NULL)。
+     *   回归证据: selftest [17] 断言 init 后 BSP 仍在。 */
     for (i = 0; i < HW_WDBG_PROTO_MAX; i++) g_pin_active[i] = g_pin_default[i];
 }
 
@@ -934,6 +945,23 @@ int hw_wdbg_selftest(int (*putf)(const char*))
     WDBG_CHECK(hw_wdbg_cmd("help", NULL) == HW_WDBG_R_HELP);
     WDBG_CHECK(hw_wdbg_cmd("bogus", NULL) == HW_WDBG_R_NOCMD);
     WDBG_CHECK(hw_wdbg_cmd(NULL, NULL) == HW_WDBG_R_NOCMD);
+
+    /* [17] 🔴 A-5 同款: init 不得抹掉已装的 BSP
+     *   与 hw_dc / hw_pin / hw_flash / hw_fault 同一类的假成功陷阱:
+     *   kvm_run 上电会自动调 hw_wdbg_init (vm_core.c:472), 且 CLI 入口
+     *   也先 init 一次。若此处 g_bsp=NULL, 真机固件装好的 UART/SPI/I2C
+     *   绑定会被悄悄换回确定性模拟器 —— 命令照样 OK, 但没碰硬件。
+     *   契约: init 只复位**本模块**状态(流缓冲/事务/线序/统计),
+     *   硬件绑定只由 hw_wdbg_bsp_install() 改, 卸载 = 传 NULL。 */
+    {
+        hw_wdbg_bsp_t probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.uart_write = wd_stub_uart_write;   /* 只占位一个非空槽位即可判别 */
+        hw_wdbg_bsp_install(&probe);
+        hw_wdbg_init(NULL);                      /* 模拟 kvm_run 上电自动调用 */
+        WDBG_CHECK(g_bsp != NULL && g_bsp->uart_write == wd_stub_uart_write);
+        hw_wdbg_bsp_install(NULL);
+    }
 
     /* [16] init 幂等复位 (旧状态不跨运行残留) */
     hw_wdbg_init(NULL);

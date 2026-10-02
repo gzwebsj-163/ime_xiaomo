@@ -157,7 +157,14 @@ static uint8_t        g_inject_flag;       /* 注入表是否非空 (VDD 模拟�
 void hw_fault_init(void* arg)
 {
     (void)arg;
-    memset(&g_bsp, 0, sizeof(g_bsp));
+    /* ⚠️ 有意「不」清 g_bsp (2026-10-02 修, 与 hw_dc / hw_pin / hw_flash / hw_wdbg 同款):
+     *   BSP = 真机 GPIO/ADC 读回调绑定, 属「环境」而非本模块的内部状态。
+     *   上电复位只清**故障注入表**(旧注入不跨运行残留), 硬件绑定保持。
+     *   真机陷阱: kvm_run 上电会自动调 hw_fault_init (vm_core.c:463) ——
+     *   若此处 memset(&g_bsp) 则真机装好的读回调被悄悄清空, 退回注入表,
+     *   scan/pin 照样给出「健康/故障」结论, 但压根没碰硬件 (典型假成功)。
+     *   卸载硬件只走 hw_fault_bsp_install(NULL)。
+     *   回归证据: selftest [8] 断言 init 后 BSP 仍在。 */
     memset(g_inject, 0, sizeof(g_inject));
     g_inject_flag = 0;
 }
@@ -224,6 +231,8 @@ static int fl_gpio_flip(int pin)
 }
 
 /* ---- 生效 BSP: 真机回调优先, 否则模拟器 ---- */
+/* selftest 专用 stub: 只用来占位一个「已装 BSP」的非空槽位, 不参与判定逻辑 */
+static int fl_stub_gpio_read(int pin) { (void)pin; return 0; }
 static int bsp_gpio_read(int pin)
 {
     return g_bsp.gpio_read ? g_bsp.gpio_read(pin) : fl_gpio_read(pin);
@@ -399,6 +408,23 @@ int hw_fault_selftest(int (*putf)(const char*))
     FL_CHECK(hw_fault_cmd("pin 2", NULL) == HW_FAULT_CTRL_STUCK);
     hw_fault_clear_all();
     FL_CHECK(hw_fault_cmd("bogus", NULL) == -1);
+
+    /* [8] 🔴 A-5 同款: init 不得抹掉已装的 BSP
+     *   与 hw_dc / hw_pin / hw_flash 同一类的「头号假成功陷阱」:
+     *   kvm_run 上电会自动调 hw_fault_init (vm_core.c:463), 若此处
+     *   memset(&g_bsp) 则真机固件装好的 GPIO/ADC 读回调被悄悄清空,
+     *   退回故障注入表 —— 界面照样出「健康/故障」结论, 但压根没碰硬件。
+     *   契约: init 只复位**本模块**状态(注入表), 硬件绑定只由
+     *   hw_fault_bsp_install() 改, 卸载 = 传 NULL。 */
+    {
+        hw_fault_bsp_t probe;
+        memset(&probe, 0, sizeof(probe));
+        probe.gpio_read = fl_stub_gpio_read;   /* 只装一个非空回调即可判别 */
+        g_bsp = probe;
+        hw_fault_init(NULL);                   /* 模拟 kvm_run 上电自动调用 */
+        FL_CHECK(g_bsp.gpio_read != NULL);
+        g_bsp = saved_bsp;                     /* 还原本用例开始前的现场 */
+    }
 
     hw_fault_clear_all();
     g_bsp = saved_bsp;   /* 恢复 BSP (真机回调/宿主空表通用) */
