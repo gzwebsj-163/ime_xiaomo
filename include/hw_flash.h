@@ -143,6 +143,11 @@ typedef struct {
     uint32_t slip_escaped;    /* 编码时转义字节数 */
     uint32_t bytes_flashed;   /* 累计写入 flash 字节 */
     uint32_t last_md5_ok;     /* 最近一次 MD5 是否一致 */
+    /* 🆕 stale_frames (2026-10-02, A-4②): 被判为「不是本命令应答」而丢弃的帧数。
+     *   真机 SYNC 回 8 帧 ⇒ 正常应出现 7。**这个计数是让修复可观测的关键** ——
+     *   没有它, 「残留被丢弃」和「残留被误当应答」在日志上长得一模一样。
+     *   真机若此值持续为 0 而 SYNC 后 chip_id 又不对, 说明固件只回了 1 帧。 */
+    uint32_t stale_frames;
     uint8_t  chip_id;         /* 最近一次探测的芯片 ID */
 } hw_flash_stat_t;
 
@@ -168,6 +173,13 @@ const char* hw_flash_result_code_str(int rc);
 /* ---- SLIP 编解码 (RFC1055; 返回输出字节数, <0 失败) ---- */
 int  hw_flash_slip_encode(const uint8_t* in, uint32_t n, uint8_t* out, uint32_t cap);
 int  hw_flash_slip_decode(const uint8_t* in, uint32_t n, uint8_t* out, uint32_t cap);
+/* ⚠️ 多帧消费版 (2026-10-02, A-4② 配套): 上面那个返回的是**解码后**长度,
+ *   不是**消费的输入**长度 —— 无转义时两者差 2(前后定界符), **有转义时不等**。
+ *   要丢弃「已读走的一帧、留下残余」就必须用这个。
+ *   *consumed 仅在**确实解到收尾定界**(帧收全)时才写, 否则置 0 ⇒ 上层继续等。
+ *   单帧场景用 hw_flash_slip_decode 即可, 行为与旧版逐位一致。 */
+int  hw_flash_slip_decode_ex(const uint8_t* in, uint32_t n, uint8_t* out, uint32_t cap,
+                             uint32_t* consumed);
 
 /* ---- 请求帧: "<BBHI" dir+cmd+len+xor_checksum + body ---- */
 int  hw_flash_frame_build(uint8_t cmd, const uint8_t* body, uint32_t blen,
