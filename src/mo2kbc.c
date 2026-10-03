@@ -720,6 +720,26 @@ static void cg_expr(Cg* cg, AstNode* n) {
             cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
             break;
         }
+        /* 内置: USB-C 快充协议采集层 (hw_usbpd, 2026-10-03) — hw_usbpd("cmd") / hw_usbpd("cmd", 数值)
+         *   hw_usbpd(s)      → OP_HW_USBPD_CALL R_TMP, ci, 0
+         *   hw_usbpd(s, num) → 数值先求值进 R_TMP, imm=R_TMP+1 编码 (动态参数)
+         *   R_TMP = 结果: >=0 有效值 (sample/dp/dm 返【协议判定枚举】, 调用方可自证是哪一档)
+         *           / 负的 ERR_* 诚实失败 (含 ERR_FLOAT 悬空) / -1 未识别
+         *   .mo 用法: void v : int = hw_usbpd("sample")   ← 返协议档
+         *             void n : int = hw_usbpd("rail_hits") ← 返硬件坑计数 */
+        if (n->text && strcmp(n->text, "hw_usbpd") == 0) {
+            int ci_up = (n->args.count >= 1)
+                ? linux_str_const(cg, n->args.items[0]) : -1;
+            if (ci_up < 0) { fail(cg); break; }
+            if (n->args.count >= 2) {
+                cg_expr(cg, n->args.items[1]);               /* 数值 → R_TMP */
+                emit(cg, OP_HW_USBPD_CALL, R_TMP, ci_up, (int64_t)R_TMP + 1);
+            } else {
+                emit(cg, OP_HW_USBPD_CALL, R_TMP, ci_up, 0);
+            }
+            cg->last_ty = 0;   /* 返回 int rc, 归零防 last_ty 残留污染类型回标 */
+            break;
+        }
         CgFunc* f = (n->text) ? cgfunc_find(&cg->funcs, n->text) : NULL;
         if (!f) { fail(cg); break; }
         cg->last_ty = 0;   /* 内置/默认返回整数 */

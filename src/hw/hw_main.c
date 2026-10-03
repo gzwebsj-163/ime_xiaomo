@@ -154,10 +154,20 @@ static int main_probe_core(void)
     if (hw_core_selftest == 0) return HW_MAIN_RC_NOLINK;
     return (hw_core_selftest(NULL) == 0) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;
 }
+/* 🕳️ 本探针是 9 个里【唯一零 BAD 区分力】的, 而且是结构性的, 不是疏忽:
+ *   底层 hw_dev_registered() 是无失败态的纯 getter (src/hw/hw_dev.c 直接
+ *   `return dev_bin.count;`), 不存在"调用了但结果不健康"这种状态。
+ *   所以本探针只能区分 NOLINK(符号没链上) 与 OK, 恒不报 BAD。
+ *   ⚠️ 锚点 H: 恒真信号比假信号更险, 因为它让你"有依据地"放心。
+ *      这里不编造判据(比如拿 count>0 当健康), 那是拿臆造的失败态
+ *      换一个假的区分力; 如实钉住"本探针无 BAD 区分力"才是真的。
+ *   => 矩阵的阴性对照段据【实测值 8 个可判别 + DEV 恒 OK】对拍, 而不是
+ *      假装 9 个都能红。若将来 hw_dev 有了真失败态, 该段会红并提醒改判据。 */
 static int main_probe_dev(void)
 {
     if (hw_dev_registered == 0) return HW_MAIN_RC_NOLINK;
-    return HW_MAIN_RC_OK;   /* 注册数 >= 0 恒真: API 表可即达 */
+    (void)hw_dev_registered();   /* 可达即算健康; 读一次以免被判"死代码" */
+    return HW_MAIN_RC_OK;
 }
 static int main_probe_direct(void)
 {

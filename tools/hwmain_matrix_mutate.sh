@@ -3,9 +3,9 @@
 # hw_main 矩阵的变异验证 (V-V: 验证工具本身的验证)
 #
 #   纪律来源: 本轮立的规矩 —— "新写的守卫必须有变异打它"。
-#   hwmain_matrix.sh 是本轮新写的判定器, 若从未被打过, 它的 15/0 无意义。
+#   hwmain_matrix.sh 是本轮新写的判定器, 若从未被打过, 它的 18/0 无意义。
 #
-#   变异 4 条, 判据 = 矩阵【必须报红】; 存活也要如实报 (存活=我变异打错, 不等于守卫失效)
+#   变异 8 条, 判据 = 矩阵【必须报红】; 存活也要如实报 (存活=我变异打错, 不等于守卫失效)
 #
 #   MV1  桩违约: parse64 吐错值, 破坏 fmt64/parse64 往返闭环
 #        -> 期望: 段 0 阳性对照检出 8/9 并中止
@@ -15,6 +15,16 @@
 #        -> 存活(正确): 共用代码两端必然相同, 证明对拍不是恒等比较
 #   MV4  形态差异写进 #ifdef __cplusplus 专属分支
 #        -> 期望: 段 1 + 段 4 md5 不一致
+#   MV5  摘掉段 0 的 PASS 累加
+#        -> 期望: 汇总自校验报红 (屏幕 [PASS] 行数 vs 计数器)
+#   MV6  阴性对照桩【声称违约却不违约】
+#        -> 期望: 段 0b 报红; 段 0 抓不到(桩仍健康) —— 阴性对照的专属靶
+#   MV7  main_probe_oem 错接 hw_token_selftest
+#        -> 期望: 段 0c 报红; 段 0/0b【都抓不到】(见 inject_mv7 注释)
+#   MV8  给 DEV 造一条【极性写反】的判据
+#        -> 期望: 段 0b 报红。⚠️ 见 inject_mv8 里的受控 A/B: 这条守卫
+#           只抓"把桩的健康值(1)判成 BAD"的判据, 抓不到"在健康值处成立"
+#           的判据 —— 灵敏度有边界, 不是万能哨兵。
 # ============================================================================
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +47,7 @@ restore() { cp "$BK/stub.c" "$STUB"; cp "$BK/main.c" "$MAIN"; cp "$BK/matrix.sh"
 # 否则一旦中途异常退出, 磁盘上留下的是被打坏的矩阵, 而脚本却报告"已还原"。
 trap restore EXIT
 
-# 还原后必须复跑基线, 确认 15/0 才是真基线 (防"带着脏变异跑基线")
+# 还原后必须复跑基线, 确认 18/0 才是真基线 (防"带着脏变异跑基线")
 echo "### 基线 (还原态) ###"
 bash tools/hwmain_matrix.sh >"$BK/base.log" 2>&1
 BRC=$?
@@ -178,7 +188,7 @@ run_mv MV4 KILL "形态专属分支差异 -> 段1/段4 md5 应不一致" inject_
 # ---- MV5: 打【汇总自校验】本身 ----
 # 🕳️ 本轮立规矩"新写的守卫必须有变异打它"。上面的"计数器 vs 屏幕 [PASS] 行数"
 #    自校验就是本轮新写的守卫, 必须证明它真能报红, 否则它只是一段好看的代码。
-#    手法: 摘掉段 0 的 PASS=$((PASS+1)) 累加 -> 屏幕 16 条但计数器 15 -> 应当报红。
+#    手法: 摘掉段 0 的 PASS=$((PASS+1)) 累加 -> 屏幕 18 条但计数器 17 -> 应当报红。
 #    判据与 MV1/MV2 的形状不同: 那两条打的是"对拍能不能发现差异",
 #    MV5 打的是"汇总数字可不可信" —— 后者正是本轮新引入的东西。
 inject_mv5_matrix() {
@@ -194,6 +204,73 @@ io.open(p,'w',encoding='utf-8').write(s)
 PY
 }
 run_mv MV5 KILL "摘掉段0的PASS累加 -> 汇总自校验必须报红" inject_mv5_matrix "$MATRIX"
+
+# ---- MV6: 阴性对照的桩【违约】(声称要坏却不坏) ----
+# 🕳️ 段 0b 是本轮新写的守卫, 必须证明它真会报红。
+#    手法: 把桩里 STUB_BREAK(0) 的"返回 -1"改成"返回 3"(即违约却不坏)。
+#    段 0 阳性对照【抓不到】(桩仍然健康), 只有段 0b 能抓到
+#    —— 这正是"每个新守卫都要有自己的变异"的道理:
+#    MV1 打的是阳性对照能发现什么, MV6 打的是阴性对照能不能发现"没坏"。
+inject_mv6() {
+python3 - <<'PY'
+import io
+p='tests/hwmain_stub_probe.c'
+s=io.open(p,encoding='utf-8').read()
+old='    if (STUB_BREAK(0)) return -1;   /* 契约违反: 负数 = 不健康 */'
+assert s.count(old)==1, 'MV6 anchor: %d' % s.count(old)
+s=s.replace(old,'    if (STUB_BREAK(0)) return 3;  /* MV6 声称违约却不坏 */')
+io.open(p,'w',encoding='utf-8').write(s)
+PY
+}
+run_mv MV6 KILL "阴性对照桩违约(ASR 返回非负) -> 段0b 必须报红" inject_mv6
+
+# ---- MV7: 探针【接错符号】(段 0c 存在的全部理由) ----
+# 🕳️ 这是本轮最有价值的一条变异。让 main_probe_oem 去读 hw_token_selftest:
+#      - 段 0  抓不到 (都是健康桩, 全 OK)
+#      - 段 0b 抓不到 (打的是全坏, 照样 8 个红 —— 它读的还是某个会坏的函数!)
+#      - 只有段 0c 抓得到 (单独 break=6/OEM 时, OEM 不翻红, 反而 7 号 TOKEN 翻红)
+#    也就是说: 若没有段 0c, "探针接错符号"这类 bug 在本矩阵里【完全隐形】。
+inject_mv7() {
+python3 - <<'PY'
+import io
+p='src/hw/hw_main.c'
+s=io.open(p,encoding='utf-8').read()
+old='    return (hw_oem_sig() == 0x5849414F4D4F3031ULL) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;'
+assert s.count(old)==1, 'MV7 anchor: %d' % s.count(old)
+# MV7: OEM 探针错接 token 的 selftest。签名不同故须调法也不同
+s=s.replace(old,'    return (hw_token_selftest(NULL) == 0) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;  /* MV7 接错符号 */')
+io.open(p,'w',encoding='utf-8').write(s)
+PY
+}
+run_mv MV7 KILL "OEM 探针错接 token 符号 -> 段0c 必须报红(0b 抓不到)" inject_mv7
+
+# ---- MV8: 给 DEV 造一条【极性写反】的判据 -> 段 0b 必须报红 ----
+# 🕳️🕳️ 这里的注释连同本条变异本身, 改过一次 —— 因为原版【举的反例是错的】。
+#
+#   原版断言: "若有人给 DEV 补一条臆造判据(比如 count>0 才算健康),
+#              BAD 会变成 9, 段 0b 立即报红"。实测【不成立】。
+#   受控 A/B (两条都只改探针一处, 桩恒返回 1, 其余全同):
+#     A) return (hw_dev_registered() > 999u) ? BAD : OK;   -> rc=0 全绿, BAD 仍 = 8
+#     B) return (hw_dev_registered() > 0u)  ? BAD : OK;   -> rc=1 报红
+#   机理: 桩的 DEV 只有一个取值 1, 所以"在 1 处成立"的判据不可能翻红;
+#         段 0b 的 DEV 臂【只能】被"把 1 判成 BAD"的判据触发。
+#   => 守卫是真的, 但灵敏度有边界: 抓极性写反/无脑, 抓不到宽松上界。
+#      纪律: 引用守卫能力前先问"它在本桩的取值域上到底能区分几档"。
+#
+#   本条用 B: 极性写反是【真实会犯的错】(三元写颠倒), 且确实落在守卫射程内。
+inject_mv8() {
+python3 - <<'PY'
+import io
+p='src/hw/hw_main.c'
+s=io.open(p,encoding='utf-8').read()
+old='    (void)hw_dev_registered();   /* 可达即算健康; 读一次以免被判"死代码" */'
+assert s.count(old)==1, 'MV8 anchor: %d' % s.count(old)
+# MV8: 极性写反的假判据, 把健康值(1)判成 BAD
+s=s.replace(old,'    return (hw_dev_registered() > 0u) ? HW_MAIN_RC_BAD : HW_MAIN_RC_OK;  /* MV8 极性写反 */')
+io.open(p,'w',encoding='utf-8').write(s)
+PY
+}
+run_mv MV8 KILL "给 DEV 造极性写反的判据 -> 段0b 必须报红" inject_mv8
 
 echo
 echo "### 还原复验 ###"

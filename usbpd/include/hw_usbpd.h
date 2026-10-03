@@ -84,7 +84,7 @@ typedef struct {
     const char* name;
     uint32_t    ratio_milli;  /* 还原系数 ×1000: 线压 = TAP × ratio / 1000 */
     int         raw_rail_mv;   /* 超过此值 = 悬空拾波/未接线, 闸门不判读 */
-    int         quiet_mv;      /* 低于此 = 该线确认为低(非未接线) */
+    int         quiet_mv;      /* TAP 自身底噪: 低于此 = 确认接地(非未接线) */
 } hw_usbpd_tap_t;
 
 extern const hw_usbpd_tap_t hw_usbpd_tap_19k_10k;   /* 19.6k/10k → 2960 */
@@ -94,12 +94,17 @@ typedef enum {
     HW_USBPD_UNKNOWN = 0,
     HW_USBPD_SDP,             /* 标准下行端口, 无快充 */
     HW_USBPD_DCP_BC12,        /* 专用充电端口 */
-    HW_USBPD_DCP_SHORT,       /* D+/D- 短接 */
+    /* ⚠️ 以下两个枚举【结构上不可由 D+/D- 静态分压判据得出】, 保留仅为 API 稳定。
+     *   DCP_SHORT 是线缆/端口短接故障 (D+与D-被短接), 与"分压档位"不是一类现象;
+     *   APPLE_2A  (D+ 2.7V/D- 2.0V 一族) 与 APPLE_1A 的 D- 判据无法在 50mV 容差下
+     *   与 1.5A 档共存, 加进表必然制造重叠 => 违背 [1] 的构造性不变量。
+     *   判读它们需要【电流实测】或 FUSB302 状态位, 不在本层职责内。 */
+    HW_USBPD_DCP_SHORT,       /* 保留: 需故障检测通道, 非分压判据 */
     HW_USBPD_QC_5V,
     HW_USBPD_QC_9V,
     HW_USBPD_QC_12V,
     HW_USBPD_APPLE_1A,
-    HW_USBPD_APPLE_2A,
+    HW_USBPD_APPLE_2A,        /* 保留: 需电流实测, 非分压判据 */
     HW_USBPD_APPLE_2_4A,
     HW_USBPD_APPLE_1_5A,
     HW_USBPD_SAMSUNG_AFC,
@@ -167,12 +172,44 @@ hw_usbpd_verdict_t hw_usbpd_classify(int dp_mv, int dm_mv);
 #define HW_USBPD_ERR_NODEV      -2   /* BSP 未装该动作 → 回落模拟 */
 #define HW_USBPD_ERR_HW         -3   /* 真机 I²C 失败 */
 #define HW_USBPD_ERR_UNSUPPORT  -4   /* 该协议本层不实现 (走 CC/PD 栈) */
+/* 🕳️ 专用码 (2026-10-03 修): 悬空闸原先返回 ERR_PARAM, 而调用方的参数
+ *   完全正确 —— 排查者会跑去检查自己传的指针, 失败原因指向错误方向。
+ *   与 hw_dmc M10「误导性失败原因比没有原因更坏」同源。
+ *   硬件坑计数仍走 stat->dp_rail_rejects, 本码只说明"为什么"。 */
+#define HW_USBPD_ERR_FLOAT      -5   /* 悬空拾波/未接线: 读数顶到 VDD 轨 */
+/* 🕳️ 码位必须【互不重叠】。cmd 层的 "help" 曾取 -2, 与 ERR_NODEV 同码
+ *   ⇒ "未装 BSP" 会被读成 "要帮助", 调用方两个判断都错。
+ *   (锚点: 一个码承载两个语义 = 两个判据都不成立。) 故 help 独占 -6。 */
+#define HW_USBPD_HELP           -6   /* 仅 cmd/cli 层: 打印用法 */
+/* 🕳️ 专用码 (2026-10-03 加 "at <mv>" 时抓到): "命令未识别"原先也返回 -1,
+ *   与 ERR_PARAM 同码 ⇒ 调用方分不清"命令名打错了"和"参数不合法"。
+ *   加了吃数字的 at 命令后这个歧义才真正有害: 二者都落到 -1。
+ *   与上面 help/-2 同型同源 (一个码承载两个语义 = 两个判据都不成立),
+ *   当时只修了 help 撞 ERR_NODEV, 漏了未识别撞 ERR_PARAM。故独立 -7。 */
+#define HW_USBPD_ERR_UNKNOWN    -7   /* 仅 cmd/cli 层: 命令名未识别 */
 
 int  hw_usbpd_pd_poll(hw_usbpd_stat_t* stat);   /* 读 FUSB302 状态寄存器 */
 int  hw_usbpd_pd_read_pdo(uint32_t* pdo_list, int max, int* n_out);
 
 void hw_usbpd_stat(hw_usbpd_stat_t* out);
 void hw_usbpd_stat_reset(void);
+
+/* ============================ 六层 L4 出口 ============================
+ * 与 hw_dmc_cmd()/hw_dc_cmd() 同形: 命令串进, 整数出。
+ * 约定: -7 = 未识别 (HW_USBPD_ERR_UNKNOWN), HW_USBPD_HELP(-6) = 要用法,
+ *       负的 ERR_* = 硬件/契约失败,
+ *       >=0 = 有效值 (协议判定枚举 / 计数值 / 档案参数)。
+ * ⚠️ 每个码位只承载一个语义 —— help 曾与 ERR_NODEV 抢 -2, 造成"未装 BSP"
+ *    被读成"要帮助", 两个判据同时失效 (2026-10-03 修);
+ *    "未识别"曾与 ERR_PARAM 抢 -1, 加了吃数字的 at 命令后二者在
+ *    1200mV 处同为 -1, 同样两个判据同时失效 (2026-10-03 修, 独立为 -7)。
+ *    🕳️ 此行曾长期停留在 "-1 = 未识别" 的旧状态, 与上面 186-188 行的
+ *       修复说明自相矛盾 —— 注释互相打架时, 查的是哪条更近被改动, 不是哪条更权威。 */
+int hw_usbpd_cmd(const char* cmd, void* ctx);
+int hw_usbpd_cli(int argc, char** argv);
+/* cli 最近一次的判读结果 (可观测出口, 让 cli 的 argv 契约可被断言)。
+ * ⚠️ argv 契约 = main.c 原样传 (argc, argv), 子命令在 argv[2]。 */
+int hw_usbpd_cli_last_rc(void);
 
 /* ============================ 自校验 ============================ */
 /* 返回 fails 计数 (0 = 全过)。覆盖: 表构造性不变量 / 还原往返 /

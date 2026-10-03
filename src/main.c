@@ -36,6 +36,7 @@
 #include "hw_pin.h"
 #include "hw_dc.h"
 #include "hw_dmc.h"
+#include "hw_usbpd.h"
 #include "infer.h"
 
 static char* read_file(const char* path) {
@@ -441,6 +442,7 @@ static void print_usage(const char* prog) {
     printf("  %s pin isp [...]       UART ISP 烧录 (AN3155: info/erase/read/go/wtest/chk)\n", prog);
     printf("  %s dc [...]            DC 电源信号层 (card/sig N/set N V/base N/range N/data N/selftest)\n", prog);
     printf("  %s dmc [...]           DMC 主从链路层 (count/cmds/states/errs/golden/frame/ok/crcvec/hello/selftest)\n", prog);
+    printf("  %s usbpd [...]         USB-C 快充协议层 (sim/rows/tol/golden/ratio/quiet/rail/sample/dp/dm/valid/rail_hits/ch_fail/samples/changed/last/pdpoll/selftest)\n", prog);
     printf("  %s debug <sub> [...]    排障三层证据链: ast/bc/tr(断点+watch)/regs\n", prog);
 }
 
@@ -495,6 +497,8 @@ int main(int argc, char** argv) {
         return hw_dc_cli(argc, argv);
     } else if (strcmp(cmd, "dmc") == 0) {
         return hw_dmc_cli(argc, argv);
+    } else if (strcmp(cmd, "usbpd") == 0) {
+        return hw_usbpd_cli(argc, argv);
     } else if (strcmp(cmd, "debug") == 0) {
         /* debug 工具: 排障三层证据链 (ast/bc/tr/regs), 传 (argc-1, argv+1) */
         if (argc >= 3) return debug_tool_main(argc - 1, argv + 1);

@@ -133,6 +133,9 @@ typedef enum {
 
     /* ---- DMC 设备管理层 (hw_dmc, 2026-10-01) — 追加在枚举末尾保持旧编号不变 ---- */
     OP_HW_DMC_CALL,   /* HW_DMC_CALL dst_reg, cmd_const_idx: dst = hw_dmc_cmd(cmd串) */
+
+    /* ---- USB-C 快充协议采集层 (hw_usbpd, 2026-10-03) — 追加在枚举末尾保持旧编号不变 ---- */
+    OP_HW_USBPD_CALL, /* HW_USBPD_CALL dst_reg, cmd_const_idx: dst = hw_usbpd_cmd(cmd串) */
 } KillsOp;
 
 /* 指令 (内部表示, 供解释器/编译器用) */

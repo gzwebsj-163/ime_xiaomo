@@ -81,8 +81,18 @@ for mo in examples/*.mo; do
     # 由 C 组 hwdc / hwdc proto 块独立覆盖。
     # dmc_test 使用 hw_dmc() 字节码内置 (OP_HW_DMC_CALL, 同先例),
     # 由 C 组 dmc / dmc .mo→kbc 块独立覆盖。
+    # usbpd_test 使用 hw_usbpd() 字节码内置 (OP_HW_USBPD_CALL, 同先例),
+    # 由下方 C 组 "usbpd selftest" 块 + "usbpd matrix" 块独立覆盖。
+    # ⚠️ 为什么必须列进来: 解释器路径【本来就不认任何 hw_* 内置】
+    #   (src/main.c / src/vm_core.c 里 "hw_dc"/"hw_dmc"/"hw_usbpd" 全部 0 命中),
+    #   所以任何走 hw_*() 内置的 .mo 跑解释器必报"调用未定义函数",
+    #   而 mo2kbc 编译链认 —— 两条路径【结构性】不一致, 不是 usbpd 独有缺陷。
+    #   漏登记的后果 = 报一个 FAIL, 让人误以为 usbpd 六层接入坏了。
+    # 🕳️ 补登记时我同时写了"由 C 组 usbpd 块独立覆盖", 当时是【假话】——
+    #   那个块还不存在, 真正建它是本轮后半段的事。假注释比没注释更险,
+    #   因为它让人以为覆盖已就位而不必去查。教训见下方 C 组 usbpd 块的注释。
     case "$name" in
-      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test|hwfault_test|hwcore_test|hwmain_test|wdbg_test|flash_test|pin_test|dc_test|dc_proto_test|dmc_test)
+      mlp*|train_*|nd_tensor_test|linux_boot|openclaw_interact|hwdev_test|hwfault_test|hwcore_test|hwmain_test|wdbg_test|flash_test|pin_test|dc_test|dc_proto_test|dmc_test|usbpd_test)
         echo "  [SKIP] mo2kbc $name (内核扩展专属: 张量算子/真Linux内核)"
         continue
         ;;
@@ -802,6 +812,55 @@ else
     fi
 fi
 
+# ---- hw_usbpd USB-C 快充协议层 (2026-10-03) ----
+# 🕳️ 记录一次自查失败, 别删: 上一轮我在上面的 mo2kbc SKIP 名单里补登记 usbpd_test,
+#   注释写"由 C 组 usbpd 块独立覆盖" —— 但那时候【C 组 usbpd 块根本不存在】,
+#   grep "usbpd" 在本文件零命中(除那段注释自己)。全家族 make test 跑到 69/0 全绿,
+#   而 usbpd 模块的实际覆盖率是【零】: 它的 73 断言自检和 8 项矩阵全是孤儿,
+#   我只是手动跑给自己看, 回归网里一个格子都没占。
+#   根因 = 把"我手动验证过"当成了"回归覆盖它"。SKIP 掉一个本已 SKIP 的用例,
+#   净效果是用例彻底消失 + 一条假注释声称它被别处兜住 = 净减覆盖。
+#   纪律: 加进 SKIP 名单前必须问"谁在跑它"; 答不上来就是减覆盖, 不是修 bug。
+upd_out=$("$BIN" usbpd selftest 2>&1); upd_rc=$?
+# ⚠️ 大小写: hwdc 等兄弟打印 "all PASS", 本模块打印 "RESULT: ALL PASS"(全大写)。
+#   照抄兄弟的小写判据会恒假 = 又一个恒真判据。故按本模块实跑输出原样抄。
+#   判据一律实跑抄取, 不凭印象写 grep 串。
+upd_n=$(printf '%s' "$upd_out" | sed -n 's/.*selftest: \([0-9]*\) 断言.*/\1/p' | head -1)
+upd_mv=$(printf '%s' "$upd_out" | sed -n 's/.*变异对照 \([0-9]*\) 项.*/\1/p' | head -1)
+# 断言数必须是【正整数】: 用 -n + 比较, 防止 sed 没匹配时得到空串 → [ "" -gt 0 ] 报语法错,
+#   更防止匹配不到时静默当成通过。
+if [ $upd_rc -eq 0 ] && printf '%s' "$upd_out" | grep -q "RESULT: ALL PASS" \
+   && [ -n "$upd_n" ] && [ "$upd_n" -gt 0 ] 2>/dev/null \
+   && [ -n "$upd_mv" ] && [ "$upd_mv" -gt 0 ] 2>/dev/null; then
+    green "  [PASS] usbpd selftest ($upd_n 断言 / 内建变异对照 $upd_mv 项全杀 / 判据表无重叠 / 阴性对照已抓死代码表)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] usbpd selftest (rc=$upd_rc 断言数=${upd_n:-未取到} 变异数=${upd_mv:-未取到})"
+    echo "$upd_out" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("usbpd selftest")
+fi
+
+# hw_usbpd 全跨矩阵 (8 项: C11==C++17 / freestanding 双交叉 / BSP 边界探针 / 黄金独立口径 / 变异对照)
+#   同样不能是孤儿脚本 —— dmc/wdbg 的注释已记过"孤儿脚本=靠人记得手动跑"的坑。
+#   本矩阵比兄弟多两项承重: ①黄金值由 python3 独立算法 vs C 运行时【两套口径】对拍,
+#   不是自比; ②变异对照证明每个守卫都有变异去打它(裁判本身在检查)。
+if [ "${XIAOMO_SKIP_MATRIX:-0}" = "1" ]; then
+    echo "  [SKIP] usbpd matrix (XIAOMO_SKIP_MATRIX=1)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+    echo "  [SKIP] usbpd matrix (缺 cc/c++)"
+else
+    upmx_out=$(bash usbpd/tools/usbpd_matrix.sh 2>&1); upmx_rc=$?
+    upmx_fail=$(printf '%s' "$upmx_out" | sed -n 's/.*汇总: PASS=[0-9]* FAIL=\([0-9]*\).*/\1/p' | tail -1)
+    if [ $upmx_rc -eq 0 ] && [ "${upmx_fail:-1}" = "0" ]; then
+        green "  [PASS] usbpd matrix (全跨 $(printf '%s' "$upmx_out" | grep -c '\[PASS\]') 项: C11==C++17 逐位/freestanding 双交叉/BSP 边界探针/黄金双口径对拍/变异对照全杀)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] usbpd matrix (rc=$upmx_rc 矩阵FAIL数=${upmx_fail:-?})"
+        echo "$upmx_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("usbpd matrix")
+    fi
+fi
+
 # hw_wdbg 全跨矩阵 (2026-10-02 接入)
 #   为什么必须有: wdbg 一直只靠本回归里的宿主 C++17 一条腿, 从未在 C11 形态下
 #   编译过。本轮把 g_bsp 由「指针」改成「结构体 + g_bsp_set」= 数据结构改动,
@@ -837,7 +896,11 @@ elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
 else
     hnmx_out=$(bash tools/hwmain_matrix.sh 2>&1); hnmx_rc=$?
     if [ $hnmx_rc -eq 0 ]; then
-        green "  [PASS] hwmain matrix (全跨 16 项: C11==C++17/六模式 override 零告警/双交叉 freestanding/9 探针/双向对拍)"
+        # 🕳️ 计数【从输出里取】, 不写死: 早先这里硬编码"全跨 16 项", 矩阵加段后
+        #    标签就悄悄变成 16 —— 数字与事实脱节, 标签越好看越不可信。
+        #    纪律: 标签里的数字要么来自产物, 要么就别写。
+        hnmx_n=$(printf '%s' "$hnmx_out" | grep -c '\[PASS\]')
+        green "  [PASS] hwmain matrix (全跨 $hnmx_n 项: C11==C++17/六模式 override 零告警/双交叉 freestanding/9 探针/段0b阴性对照/段0c逐探针对照/双向对拍)"
         PASS=$((PASS+1))
     else
         red "  [FAIL] hwmain matrix (rc=$hnmx_rc)"
@@ -864,10 +927,17 @@ if [ "${XIAOMO_SKIP_VARIANT:-1}" = "1" ]; then
 elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
     echo "  [SKIP] hwmain variant (缺 cc/c++)"
 else
-    echo "  ... hw_main 判定器变异 (5 条, 耗时较长, 耐心等)"
+    echo "  ... hw_main 判定器变异 (耗时较长, 耐心等)"
     hnvar_out=$(bash tools/hwmain_matrix_mutate.sh 2>&1); hnvar_rc=$?
     if [ $hnvar_rc -eq 0 ]; then
-        green "  [PASS] hwmain variant (5 条变异全部符合预期: 4 杀 1 存活, 裁判确实在检查)"
+        # 🕳️ 同上一处: 数字从变异脚本的汇总里取, 不写死。早先这里写死
+        #    "5 条变异: 4 杀 1 存活", 加到 8 条后标签没跟着变 —— 而 run_mv
+        #    把"设计上该存活"的 MV3 也计入"符合预期", 所以真正的口径是
+        #    "意外存活 0 / 判据异常 0", 不是"杀 N 条"。
+        hnv_ok=$(printf '%s' "$hnvar_out" | sed -n 's/.*符合预期: \([0-9]*\).*/\1/p' | head -1)
+        hnv_sv=$(printf '%s' "$hnvar_out" | sed -n 's/.*存活: \([0-9]*\).*/\1/p' | head -1)
+        hnv_br=$(printf '%s' "$hnvar_out" | sed -n 's/.*判据异常: \([0-9]*\).*/\1/p' | head -1)
+        green "  [PASS] hwmain variant ($hnv_ok 条变异全部符合预期: 意外存活 $hnv_sv / 判据异常 $hnv_br, 裁判确实在检查)"
         PASS=$((PASS+1))
     else
         red "  [FAIL] hwmain variant (rc=$hnvar_rc) —— 判据本身失效, 上面所有绿灯都不作数"

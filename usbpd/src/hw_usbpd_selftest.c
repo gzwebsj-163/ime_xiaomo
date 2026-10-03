@@ -41,7 +41,19 @@ static int sim_analog_mv(int ch, int* out_mv)
 static int sim_i2c_read(uint8_t r, uint8_t* b, uint32_t n)
 { (void)r; (void)b; (void)n; g_i2c_installed = 1; return 0; }
 
-static const hw_usbpd_bsp_t SIM_BSP = { "sim", sim_analog_mv, 0, sim_i2c_read, 0 };
+/* 🕳️ 指定初始化器, 不是位置初始化 (锚点 L 实锤 2026-10-03):
+ *   位置写法 `{ "sim", sim_analog_mv, 0, sim_i2c_read, 0 }` 在结构体
+ *   增删字段时会【静默错位】—— 编译器对位置初始化只告警不报错,
+ *   而对"值不解引用"的情况甚至什么都不说。
+ *   锚点 L: 我曾用 `{{0,0,0,0,0,0}}` 猜字段数, 编译器一声不吭。
+ *   指定初始化器保证: 字段名对不上会【硬错误】, 漏填字段显式补 0。 */
+static const hw_usbpd_bsp_t SIM_BSP = {
+    .name        = "sim",
+    .analog_mv   = sim_analog_mv,
+    .i2c_write   = 0,
+    .i2c_read    = sim_i2c_read,
+    .biphase_rx  = 0
+};
 
 /* 把线电压灌进"真实分压链路"再采回来 —— 测的是整条链路不是分类纯函数 */
 static void wire_line_mv(int dp_mv, int dm_mv)
@@ -247,8 +259,17 @@ int hw_usbpd_selftest(void)
         hw_usbpd_stat_t st; uint32_t pdo[8]; int n = -1;
         /* 🕳️ 用例错先怀疑用例: 上一版这里直接用 SIM_BSP, 但它的第 4 个
          *    字段 sim_i2c_read 是【非 NULL】的, 条件根本没成立。
-         *    正确做法 = 显式装一个 i2c_read=NULL 的 BSP。 */
-        static const hw_usbpd_bsp_t NOI2C = { "no-i2c", sim_analog_mv, 0, 0, 0 };
+         *    正确做法 = 显式装一个 i2c_read=NULL 的 BSP。
+         *    🕳️ 且必须用【指定初始化器】: 位置写法在这类"故意留空"的桩上
+         *    极易看错位 —— 写成 { "no-i2c", sim_analog_mv, 0, 0, 0 } 恰好对,
+         *    但一旦结构体加字段, 那个 0 会滑到 i2c_read 之外, 桩就废了。 */
+        static const hw_usbpd_bsp_t NOI2C = {
+            .name        = "no-i2c",
+            .analog_mv   = sim_analog_mv,
+            .i2c_write   = 0,
+            .i2c_read    = 0,        /* ← 本例的【被测点】, 必须显式为 0 */
+            .biphase_rx  = 0
+        };
         hw_usbpd_bsp_install(&NOI2C);
         CHECK(hw_usbpd_pd_poll(&st) == HW_USBPD_ERR_UNSUPPORT, "无 I2C 应 ERR_UNSUPPORT");
         CHECK(hw_usbpd_pd_read_pdo(pdo, 8, &n) == HW_USBPD_ERR_UNSUPPORT,
@@ -286,7 +307,17 @@ int hw_usbpd_selftest(void)
          *   这 8 个精确值照旧命中 => 结构上抓不到。现改为遍历真表。 */
         int tn = 0, i, unreachable = 0;
         const hw_usbpd_qc_row_t* T = hw_usbpd_qc_table(&tn);
-        for (i = 0; i < tn; i++) {
+        /* 🕳️【测试自身要能报, 而不是崩, 2026-10-03 修】
+         *   本处原先直接 T[i].dp, 没有 NULL 守卫。变异 M9(真表出口返 NULL)
+         *   时: [1] 的 !T 守卫【确实报了坏】, 但本循环随后解引用 NULL 崩掉,
+         *   进程被 SIGSEGV 打死 ⇒ 退出码 -11, 断言报告根本没机会打印。
+         *   后果是【信号失效】: 变异测试只能报 "KILLED-BY-CRASH", 而崩溃
+         *   与"守卫按设计命中"是两回事 —— 崩在别处不能证明 !T 守卫生效。
+         *   这就是"失败消息硬编码/缺失比没有原因更坏"的变体: 原因被信号盖了。
+         *   修法: 真表为空时【报断言失败并跳过循环】, 让 M9 变成干净的
+         *   断言命中, 从而真正证明 !T 守卫有效。 */
+        CHECK(T != 0 && tn > 0, "真表出口返回空 (T=%p, n=%d)", (const void*)T, tn);
+        for (i = 0; T && i < tn; i++) {
             hw_usbpd_verdict_t got = judge(T[i].dp, T[i].dm);
             g_var_total++;
             if (got != T[i].v) { g_var_fail++; unreachable++;
@@ -295,6 +326,267 @@ int hw_usbpd_selftest(void)
                        hw_usbpd_verdict_name(got), hw_usbpd_verdict_name(T[i].v)); }
         }
         CHECK(unreachable == 0, "存在 %d 行不可达 (死代码表)", unreachable);
+    }
+
+    printf("[13] 悬空闸必须返专用码 ERR_FLOAT (不能甩锅 ERR_PARAM)\n");
+    {
+        /* 🕳️ 锚点 M10: 误导性失败原因比没有原因更坏。
+         *   悬空时调用方参数【完全正确】, 返 ERR_PARAM 会把排查者
+         *   引去检查自己的指针, 失败原因指向错误方向。
+         *   变异 M11 会把这里改回 ERR_PARAM, 本断言必须抓到。 */
+        hw_usbpd_dp_result_t r;
+        int rc;
+        g_sim_fail_dp = 0;
+        g_sim_dp_raw = 3300;                 /* 悬空 */
+        rc = hw_usbpd_sample(&r);
+        CHECK(rc == HW_USBPD_ERR_FLOAT, "悬空应返 ERR_FLOAT(%d), 实得 %d",
+              HW_USBPD_ERR_FLOAT, rc);
+        CHECK(rc != HW_USBPD_ERR_PARAM, "悬空不得返 ERR_PARAM (会把排查引向调用方参数)");
+        /* 码位互斥: 悬空码不得与任何其它语义码撞车 */
+        CHECK(HW_USBPD_ERR_FLOAT != HW_USBPD_ERR_PARAM &&
+              HW_USBPD_ERR_FLOAT != HW_USBPD_ERR_NODEV &&
+              HW_USBPD_ERR_FLOAT != HW_USBPD_ERR_HW &&
+              HW_USBPD_ERR_FLOAT != HW_USBPD_ERR_UNSUPPORT &&
+              HW_USBPD_ERR_FLOAT != HW_USBPD_HELP,
+              "ERR_FLOAT 与其它码位重叠");
+    }
+
+    printf("[14] 硬件坑③ 底噪确认闸 (quiet_mv 必须真生效, 不是死字段)\n");
+    {
+        /* 🕳️ 这条断言就是【假守卫】的解药。
+         *   修复前 quiet_mv 改 300 倍 (30→9999) 也不影响任何行为断言,
+         *   只有黄金值那条红 —— 也就是"看起来被锁住, 实际无感"。
+         *   变异 M12 把 quiet_mv 闸整段删掉, 本断言必须红。
+         *
+         * 场景: D+ 是 BC1.2 的 600mV, D- 悬空 (只读到 40mV 底噪)。
+         *   不做底噪确认 → 40mV 与 0mV 相差 40 < TOL(50) 仍落进
+         *   {600, 0} 方框 => 判成 BC1.2。但那根线根本没接。
+         *   做了确认 → 40mV 归一为 0, 判定不变, 但 dp/dm 读数诚实。 */
+        hw_usbpd_dp_result_t r;
+        g_sim_fail_dp = 0;
+        /* 🕳️【用例错先怀疑用例】第一版这里用 wire_line_mv(600, 0) 灌值,
+         *   而 wire_line_mv 是整数除法 200*1000/2960 → 再 *2960/1000,
+         *   往返必然截断 (实得 198 而非 200) => 断言"必须精确 200"自己就错。
+         *   (与 probe_cap T3 同一类: 用例的期望值算错, 不是产品错。)
+         *   修法 = 不走有损往返, 直接反解出【期望的还原值】所对应的 raw,
+         *   再用 ±1 raw 的余量构造"底噪级"与"清晰高电平"。 */
+        g_sim_dp_raw = 600 * 1000 / hw_usbpd_tap_19k_10k.ratio_milli;
+        /* D- 给一个明确落在底噪以下的 raw: 期望还原值 = 40mV 量级 */
+        g_sim_dm_raw = 40 * 1000 / hw_usbpd_tap_19k_10k.ratio_milli;
+        CHECK(hw_usbpd_sample(&r) == HW_USBPD_OK, "底噪级采样应成功");
+        /* 判读结果: 归一后仍应是 BC1.2 (40mV 本就在 0 的容差内) */
+        CHECK(r.verdict == HW_USBPD_DCP_BC12, "底噪归一后应判 BC1.2, 实得 %s",
+              hw_usbpd_verdict_name(r.verdict));
+        /* 🔑 真正的判别点: 读数本身必须已被归一为 0。
+         *   若闸门被删, dm_mv 会是 40 → 这里红。 */
+        CHECK(r.dm_mv == 0, "低于底噪的读数必须归一为 0, 实得 %d "
+              "(闸门被删? 判据层对 quiet_mv 完全无感=假守卫)", r.dm_mv);
+        /* 阳性对照: 高于底噪的读数绝不能被归一。
+         *   期望值用【同一个反解式】算, 不写死 200 —— 避免重犯上面的错。 */
+        {
+            int want = 200;
+            g_sim_dm_raw = want * 1000 / hw_usbpd_tap_19k_10k.ratio_milli;
+            CHECK(hw_usbpd_sample(&r) == HW_USBPD_OK, "采样应成功");
+            CHECK(r.dm_mv >= want - 5 && r.dm_mv <= want + 5,
+                  "高于底噪的 %dmV 不得被归一, 实得 %d (容差 ±5, 吸收整数除法截断)",
+                  want, r.dm_mv);
+            CHECK(r.dm_mv > hw_usbpd_tap_19k_10k.quiet_mv,
+                  "阳性对照: 200mV 必须高于底噪阈值 %d, 用例数据有问题",
+                  hw_usbpd_tap_19k_10k.quiet_mv);
+        }
+    }
+
+    printf("[15] cmd/cli 出口: 码位互斥 + 未装 BSP 诚实失败\n");
+    {
+        /* 🕳️ help 曾取 -2, 与 ERR_NODEV 同码 ⇒ "未装 BSP"会被读成"要帮助",
+         *   两个判据同时失效。变异 M13 会把 help 改回 -2, 本组必须红。 */
+        CHECK(HW_USBPD_HELP != HW_USBPD_ERR_NODEV,
+              "HELP(%d) 与 ERR_NODEV(%d) 撞码", HW_USBPD_HELP, HW_USBPD_ERR_NODEV);
+        /* 🕳️ 同型第二处 (加 "at <mv>" 时抓到): "未识别"原先也返回 -1, 与
+         *   ERR_PARAM 同码 ⇒ "命令名打错"和"参数不合法"调用方分不开。
+         *   第一版只修了 help 撞 ERR_NODEV, 漏了这一个 —— 同一个毛病修一半。
+         *   => 守卫必须【成组】: 每加一个新码位, 就要同时断言它与所有旧码位互斥。 */
+        CHECK(HW_USBPD_ERR_UNKNOWN != HW_USBPD_ERR_PARAM,
+              "ERR_UNKNOWN(%d) 与 ERR_PARAM(%d) 撞码", HW_USBPD_ERR_UNKNOWN, HW_USBPD_ERR_PARAM);
+        CHECK(HW_USBPD_ERR_UNKNOWN != HW_USBPD_HELP,
+              "ERR_UNKNOWN(%d) 与 HELP(%d) 撞码", HW_USBPD_ERR_UNKNOWN, HW_USBPD_HELP);
+        /* 全部负码两两互斥 (7 个码位, 21 对) —— 一次性把整组锁死,
+         * 免得以后再加码位时重犯同型错。 */
+        {
+            static const int codes[] = { HW_USBPD_ERR_PARAM, HW_USBPD_ERR_NODEV,
+                                         HW_USBPD_ERR_HW, HW_USBPD_ERR_UNSUPPORT,
+                                         HW_USBPD_ERR_FLOAT, HW_USBPD_HELP,
+                                         HW_USBPD_ERR_UNKNOWN };
+            const int n = (int)(sizeof(codes) / sizeof(codes[0]));
+            int i, j, bad = 0;
+            for (i = 0; i < n; i++)
+                for (j = i + 1; j < n; j++)
+                    if (codes[i] == codes[j]) bad++;
+            CHECK(bad == 0, "7 个负码必须两两互斥, 实得 %d 对撞码", bad);
+        }
+        CHECK(hw_usbpd_cmd("help", 0) == HW_USBPD_HELP, "help 码位不符");
+        CHECK(hw_usbpd_cmd("nosuchcmd", 0) == HW_USBPD_ERR_UNKNOWN, "未识别命令应返 ERR_UNKNOWN");
+        /* 未装 BSP 时 sample 必须诚实 ERR_NODEV, 不能返回假判定 */
+        hw_usbpd_bsp_install(NULL);
+        CHECK(hw_usbpd_cmd("sample", 0) == HW_USBPD_ERR_NODEV,
+              "未装 BSP 时 sample 应 ERR_NODEV");
+        CHECK(hw_usbpd_cmd("sim", 0) == 1, "未装 BSP 时 sim 应为 1");
+        hw_usbpd_bsp_install(&SIM_BSP);
+        /* 装 BSP 后 sim=0, 且 rows/tol 这类不依赖硬件的必须照常返回有效值 */
+        CHECK(hw_usbpd_cmd("sim", 0) == 0, "装了 BSP 后 sim 应为 0");
+        CHECK(hw_usbpd_cmd("rows", 0) >= 4, "rows 应返回真表行数");
+        CHECK(hw_usbpd_cmd("tol", 0) == HW_USBPD_TOL_MV, "tol 应为 50");
+        /* 🔑【argv 契约】家族约定 = main.c 原样传 (argc, argv), 子命令在 argv[2]。
+         *   历史上本层写成 argv[1], 症状是"每条命令都返回 -1 未识别",
+         *   看起来像整条命令线没接上, 真因只是偏移 1。
+         *
+         * 🕳️【恒真信号, 锚点 K/L 第四形态】第一版断言写成
+         *   `hw_usbpd_cmd(av[2]) == 8` —— 全绿。但把 cli 改回 argv[1] 后
+         *   它【依然全绿】(M14 存活)。根因: 断言调的是 cmd(),
+         *   被测物是 cli(), 两者之间【没有任何调用】。
+         *   验证器检查的不是被测物 => 这条断言恒真, 写了等于没写。
+         *   => 修法: 断言必须【穿过 cli 本身】, 且读它的返回值。
+         *   hw_usbpd_cli 原本只 printf 不回传, 没法观测 =>
+         *   加 cli_last_rc() 出口, 让 cli 的决策变成可断言的整数。 */
+        {
+            char arg0[] = "xiaomo", arg1[] = "usbpd", arg2[] = "rows";
+            char* av[3];
+            av[0] = arg0; av[1] = arg1; av[2] = arg2;
+            hw_usbpd_cli(3, av);
+            CHECK(hw_usbpd_cli_last_rc() == hw_usbpd_cmd("rows", 0),
+                  "cli 必须把【argv[2]=\"rows\"】的结果回传, 实得 %d (期望 %d)。"
+                  "若为 -1, 说明 cli 又在读 argv[1] (把族名当子命令)",
+                  hw_usbpd_cli_last_rc(), hw_usbpd_cmd("rows", 0));
+            /* 反向: argv[1] 是族名, cmd 层不认识它 —— 这正是原 bug 的另一面 */
+            CHECK(hw_usbpd_cmd(av[1], 0) == HW_USBPD_ERR_UNKNOWN,
+                  "argv[1](\"usbpd\") 必须返回未识别 ERR_UNKNOWN, 实得 %d "
+                  "(若非 %d, 说明族名被子命令表吞了)",
+                  hw_usbpd_cmd(av[1], 0), HW_USBPD_ERR_UNKNOWN);
+            /* 用法路径: argc<3 时 cli 必须回 1 (不是回一个协议值冒充成功) */
+            CHECK(hw_usbpd_cli(2, av) == 1, "argc<3 应打用法并回 1");
+            CHECK(hw_usbpd_cli_last_rc() == 0,
+                  "用法路径不得留下上次命令的 rc 残留 (实得 %d)", hw_usbpd_cli_last_rc());
+        }
+    }
+
+    printf("[16] at <mv>: 吃数字的判据查询 (双参路径的承重口, 不是死代码)\n");
+    {
+        /* 🕳️ 这组断言是【接线时被迫加的】, 不是补形式:
+         *   六层 L2/L3 接上后实测, mo2kbc 双参拼出的 "rows8" 恒 -1 ——
+         *   本层全是 strcmp 精确匹配, 没有任何命令吃数字后缀 ⇒ 双参路径死。
+         *   家族其余成员 (hw_dc "read 99") 双参都活, 故补 "at <mv>"。
+         *
+         * 🔑 四档取值必须【互不相同】, 否则断言恒真, 等于没写:
+         *   classify(mv,mv) 的落点已由真表算过 ——
+         *     2700 → 命中 {2700,2700,APPLE_2_4A}
+         *     1200 → 命中 {1200,1200,SAMSUNG_AFC}
+         *       0 → 无行命中且两线都低于容差 → SDP
+         *     2000 → 无行命中但高于容差 → FASTCHARGE_UNKNOWN
+         *   若查表逻辑退化 (比如容差放到 300), 2700 与 2000 可能同档, 本组即红。 */
+        CHECK(hw_usbpd_cmd("at 2700", 0) == HW_USBPD_APPLE_2_4A,
+              "at 2700 应判 APPLE_2_4A, 实得 %d", hw_usbpd_cmd("at 2700", 0));
+        CHECK(hw_usbpd_cmd("at 1200", 0) == HW_USBPD_SAMSUNG_AFC,
+              "at 1200 应判 SAMSUNG_AFC, 实得 %d", hw_usbpd_cmd("at 1200", 0));
+        CHECK(hw_usbpd_cmd("at 0", 0) == HW_USBPD_SDP,
+              "at 0 应判 SDP, 实得 %d", hw_usbpd_cmd("at 0", 0));
+        CHECK(hw_usbpd_cmd("at 2000", 0) == HW_USBPD_FASTCHARGE_UNKNOWN,
+              "at 2000 应判 FASTCHARGE_UNKNOWN, 实得 %d", hw_usbpd_cmd("at 2000", 0));
+        /* 四档两两不等 —— 直接把"恒真"钉死 */
+        CHECK(HW_USBPD_APPLE_2_4A != HW_USBPD_SAMSUNG_AFC &&
+              HW_USBPD_SAMSUNG_AFC != HW_USBPD_SDP &&
+              HW_USBPD_SDP != HW_USBPD_FASTCHARGE_UNKNOWN,
+              "四档枚举值必须互不相同, 否则上面 4 条断言恒真");
+
+        /* --- 三个守卫, 缺一即红 ---
+         * (a) 空参数: "at " 若不拦, atoi("")=0 会被读成"0mV 判 SDP",
+         *     把"忘了传参"伪装成"一个有效判读" ⇒ 必须 ERR_PARAM。 */
+        CHECK(hw_usbpd_cmd("at ", 0) == HW_USBPD_ERR_PARAM,
+              "\"at \"(空参数) 应 ERR_PARAM, 实得 %d (若得 SDP=1 说明空参被当成 0mV)",
+              hw_usbpd_cmd("at ", 0));
+        /* (b) 负线压: 物理不存在, 却是 classify 的合法入参 */
+        CHECK(hw_usbpd_cmd("at -5", 0) == HW_USBPD_ERR_PARAM,
+              "\"at -5\" 应 ERR_PARAM, 实得 %d", hw_usbpd_cmd("at -5", 0));
+        /* (c) 越界: 线压上界 = raw_rail_mv * ratio / 1000 = 2850*2960/1000 = 8436 */
+        {
+            long cap = (long)hw_usbpd_tap_19k_10k.raw_rail_mv *
+                       (long)hw_usbpd_tap_19k_10k.ratio_milli / 1000;
+            char over[32], edge[32];
+            snprintf(over, sizeof(over), "at %ld", cap + 1);
+            snprintf(edge, sizeof(edge), "at %ld", cap);
+            CHECK(hw_usbpd_cmd(over, 0) == HW_USBPD_ERR_PARAM,
+                  "\"%s\"(超上界 %ldmV) 应 ERR_PARAM, 实得 %d",
+                  over, cap, hw_usbpd_cmd(over, 0));
+            /* 边界本身【必须放行】: 上界处的守卫若写成 >cap 而非 >=cap,
+             * 数值上仍能过 cap+1 这条断言 —— 补一条"边界可达"才抓得住。 */
+            CHECK(hw_usbpd_cmd(edge, 0) != HW_USBPD_ERR_PARAM,
+                  "\"%s\"(正好等于上界 %ldmV) 应放行判读, 实得 ERR_PARAM",
+                  edge, cap);
+        }
+        /* 非法数字 (strtol 残留字符) */
+        CHECK(hw_usbpd_cmd("at abc", 0) == HW_USBPD_ERR_PARAM,
+              "\"at abc\" 应 ERR_PARAM, 实得 %d", hw_usbpd_cmd("at abc", 0));
+        /* 前缀不得遮蔽既有命令 —— "at " 插在 selftest 之后, 顺序不能反。
+         *   行数走【真表出口】取, 不写死常量: 写死就变成"表改了断言还绿"。 */
+        {
+            int n = 0;
+            hw_usbpd_qc_table(&n);
+            CHECK(n >= 4, "真表行数应 >=4, 实得 %d", n);
+            CHECK(hw_usbpd_cmd("rows", 0) == n,
+                  "加 at 前缀后 rows 仍须返真表行数 %d, 实得 %d", n, hw_usbpd_cmd("rows", 0));
+            CHECK(hw_usbpd_cmd("tol", 0) == HW_USBPD_TOL_MV,
+                  "加 at 前缀后 tol 仍须返 %d, 实得 %d",
+                  HW_USBPD_TOL_MV, hw_usbpd_cmd("tol", 0));
+        }
+        /* ⚠️ 这里【故意不测 cmd("selftest")】: 它会调 hw_usbpd_selftest(),
+         *   而本函数正在 selftest 里 ⇒ 无限递归。
+         *   第一版这里写了 `CHECK(cmd("selftest")==0||1)` —— 双重错误:
+         *     (1) `x==0||1` 恒真 = 我自己刚在 [15] 记下的"恒真断言"同款,
+         *         写完就犯;
+         *     (2) 会真的递归下去, 栈爆。
+         *   记下来: 断言"某命令存在"时, 必须先确认执行它不会回头再进自己。 */
+
+        /* 🔴【本组是"验的不是被测物"的第二次现形 —— 2026-10-03 实跑抓到】
+         *   上面 12 条全部调 hw_usbpd_cmd() ⇒ 绿。
+         *   但真从命令行敲 `./xiaomo usbpd at 2700` 返回 -7:
+         *   cli 传进来的是 argv[2]="at" + argv[3]="2700", 而 cli 当时
+         *   只取 argv[2] 当【完整命令串】⇒ cmd("at") 匹配不上 "at " 前缀。
+         *   => 命令层的 12 条全绿, 用户一个都用不了: 验的不是被测物。
+         *   与 [15] 踩的同一个坑 (断言调 cmd、没穿 cli), 区别是这次
+         *   我先只信了 cmd 层就报了"全绿", 靠【外部实跑】才抓出来。
+         *   纪律: 命令层绿 ≠ 入口绿, 入口必须用【真 argv 形状】穿一遍。 */
+        {
+            char a0[] = "xiaomo", a1[] = "usbpd";
+            const char* cases[][3] = {
+                { "at", "2700", "" }, { "at", "1200", "" }, { "at", "0", "" },
+                { "at", "2000", "" },
+            };
+            const int want[] = { HW_USBPD_APPLE_2_4A, HW_USBPD_SAMSUNG_AFC,
+                                 HW_USBPD_SDP, HW_USBPD_FASTCHARGE_UNKNOWN };
+            int k;
+            for (k = 0; k < 4; k++) {
+                char a2[16], a3[16];
+                char* av[5];
+                snprintf(a2, sizeof(a2), "%s", cases[k][0]);
+                snprintf(a3, sizeof(a3), "%s", cases[k][1]);
+                av[0] = a0; av[1] = a1; av[2] = a2; av[3] = a3; av[4] = 0;
+                hw_usbpd_cli(4, av);
+                CHECK(hw_usbpd_cli_last_rc() == want[k],
+                      "cli 穿真 argv(\"at\" \"%s\") 应回 %d, 实得 %d "
+                      "(若得 ERR_UNKNOWN=%d, 说明 cli 又只读了 argv[2])",
+                      cases[k][1], want[k], hw_usbpd_cli_last_rc(), HW_USBPD_ERR_UNKNOWN);
+            }
+            /* 空参数必须穿过 cli 仍是 ERR_PARAM (不能被拼成 "at" 而丢守卫) */
+            {
+                char a2[] = "at";
+                char* av[4];
+                av[0] = a0; av[1] = a1; av[2] = a2; av[3] = 0;
+                hw_usbpd_cli(3, av);
+                CHECK(hw_usbpd_cli_last_rc() == HW_USBPD_ERR_UNKNOWN,
+                      "cli 收 \"at\"(无参数) 应回 ERR_UNKNOWN(%d), 实得 %d "
+                      "(若回 %d 说明守卫被绕过)",
+                      HW_USBPD_ERR_UNKNOWN, hw_usbpd_cli_last_rc(), HW_USBPD_SDP);
+            }
+        }
     }
 
     printf("\n==== selftest: %d 断言 / %d 失败 | 变异对照 %d 项 / %d 存活 ====\n",

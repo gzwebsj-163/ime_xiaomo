@@ -7,6 +7,9 @@
 #         但 hw_main.c 从未在 C11 形态下编译过 —— 家族铁律"C11==C++17
 #         逐位一致"在**总调度**这一层是空白。锚点: 自证工具与被测物共享盲点。
 #
+#   0.  桩的阳性对照 (9 探针全 OK)
+#   0b. 桩的阴性对照 (8 个可判别类全 BAD)  <- 证明探针会红
+#   0c. 逐探针独立对照 (一次只翻一个)      <- 证明各探针接对符号
 #   1. C11 vs C++17 输出 md5 逐位对拍 (HOST 模式)
 #   2. 六模式 override 编译零警告
 #   3. freestanding 双交叉 (riscv32 / xtensa) 零警告
@@ -18,6 +21,15 @@
 #      而拉真模块会拖进整个 VM (hw_direct -> kvm_* / hw_oem -> kprog_*),
 #      把与 hw_main 无关的变量掺进双形态对拍。
 #      桩的【阳性对照】要求: 9 个探针必须全 OK (见下方 probeall 预检)。
+#
+#   ⚠️ 桩带来的已知盲区 (如实记, 不假装覆盖):
+#      (a) NOLINK 分支在 macOS 上【结构性不可测】。实测 4 种链接旗标
+#          (-U / dynamic_lookup / flat_namespace / undefined,suppress) 全部
+#          仍报 undefined; 借 dylib 绕过去看似拿到 0, 但加 -rpath 或
+#          DYLD_LIBRARY_PATH 后立刻变成非 0 —— 那 rc=7 是"dylib 没被加载"
+#          的假象, 不是 NOLINK 语义。=> 结论: 真机/ELF 上才谈得上验 NOLINK。
+#      (b) 真模块下的探针分支未经此矩阵验证 (同 (a) 的理由 + 拖 VM)。
+#      段 0b/0c 补的是【探针逻辑本身】的区分力, 不能外推到链接期行为。
 # ============================================================================
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +81,77 @@ else
   echo "  [FAIL] 桩违约, 探针非全 OK -> 对拍会测到桩而非被测物, 中止"
   "$OUT/stubchk" main selftest 2>&1 | sed 's/^/    /'
   exit 1
+fi
+
+echo
+echo "================ 0b. 桩的阴性对照 (8 个可判别类须全 BAD) ================"
+# 🕳️🕳️ 为什么段 0 的阳性对照【不够】(锚点 D / 锚点 H):
+#   段 0 只跑了"桩让 9 个探针全绿"这一条路。于是哪怕 main_probe_dev 里那句
+#   `return OK` 是恒真的、哪怕某个探针根本接错了符号, 矩阵照样全绿。
+#   任何【只测过"好"】的探针都还没被验过 —— 本段就是那个"红"的证据。
+#   预期 BAD=8 而不是 9: 2 号 DEV 的底层是 hw_dev_registered(), 一个
+#   【无失败态的纯 getter】(hw_dev.c 直接 return dev_bin.count), 不存在
+#   BAD 状态可言。这里不编造判据换假的区分力, 而是如实钉住"8 可判别 + 1 恒绿"。
+cc -std=c11 -DSTUB_BAD_ALL=1 $INC -o "$OUT/stubbad" $SRCS 2>"$OUT/stubbad.log"
+if [ ! -x "$OUT/stubbad" ]; then
+  echo "  [FAIL] 阴性对照桩构建失败"; sed 's/^/    /' "$OUT/stubbad.log"; FAIL=$((FAIL+1))
+else
+  BOUT=$("$OUT/stubbad" main selftest 2>&1)
+  NBAD=$(printf '%s' "$BOUT" | grep -c 'probe=BAD' || true); NBAD=${NBAD:-0}
+  NOK=$(printf '%s' "$BOUT" | grep -c 'probe=OK'  || true); NOK=${NOK:-0}
+  NBAD=$(printf '%s' "$NBAD" | tr -d '[:space:]'); NOK=$(printf '%s' "$NOK" | tr -d '[:space:]')
+  # 2 号必须是那个"恒 OK" —— 若它也红了, 说明有人给 DEV 造了假判据
+  # ⚠️ 但本臂的【灵敏度有边界】, 别把它当万能哨兵: 桩的 DEV 只有一个取值 1,
+  #    所以"在 1 处成立"的判据(count>0 / count>999)它一个都抓不到,
+  #    只有"把 1 判成 BAD"的判据(极性写反、无脑 return BAD)才触发。
+  #    边界由 tools/hwmain_matrix_mutate.sh 的 MV8 受控 A/B 实测钉住, 非推测。
+  # 🕳️🕳️ 这里必须锚到类表行, 不能只 grep '[2]': selftest 的自检行长得像
+  #    "hwmain: [2] golden = 0xA57E74DF OK" 也含 [2], 首版就是这么把
+  #    DEVST 取成多行的 —— 判据抓到了自己。数据本身一直是对的(8/1/DEV=OK),
+  #    错的只有我的取法。教训: 判据的匹配式要比被测物更窄, 不是更宽。
+  DEVST=$(printf '%s' "$BOUT" | grep '\[2\] DEV' | sed 's/.*probe=/probe=/')
+  echo "  probe=BAD 计数 = $NBAD (应 = 8)   probe=OK 计数 = $NOK (应 = 1, 即 2 号 DEV)"
+  echo "  2 号 DEV 实际 = $DEVST (应 = probe=OK)"
+  if [ "$NBAD" = "8" ] && [ "$NOK" = "1" ] && [ "$DEVST" = "probe=OK" ]; then
+    echo "  [PASS] 8 个可判别探针在契约违反时全报 BAD -> 探针确有区分力"; PASS=$((PASS+1))
+  else
+    echo "  [FAIL] 阴性对照不符预期 -> 有探针在契约违反时仍报 OK (= 不具区分力)"
+    printf '%s' "$BOUT" | grep '\[.\]' | sed 's/^/    /'; FAIL=$((FAIL+1))
+  fi
+fi
+
+echo
+echo "================ 0c. 逐探针独立对照 (一次只翻一个) ================"
+# 🕳️ 段 0b 只证"能让它们红", 证不了"每个探针各自接对了符号"。
+#    若 main_probe_oem 错接了 hw_token_selftest, 段 0b 仍会 8 红 —— 因为
+#    它照样读的是某个会坏的桩函数。本段逐个单独破坏, 要求【恰好一个】翻红
+#    且翻在预期序号上: 序号错位=接错符号, 数量>1=有探针在读共享状态。
+#    2 号 DEV 不在此列 —— 它无 BAD 区分力(见段 0b), 无从判别。
+#    纪律: "全部一起坏"和"各自坏"是两件事, 后者才抓得出接错符号。
+DISCR="0 1 3 4 5 6 7 8"
+ONE_OK=1
+for k in $DISCR; do
+  cc -std=c11 -DSTUB_BAD_ONE=$k $INC -o "$OUT/one_$k" $SRCS 2>"$OUT/one_$k.log"
+  if [ ! -x "$OUT/one_$k" ]; then
+    echo "  [FAIL] break=$k 构建失败"; sed 's/^/    /' "$OUT/one_$k.log" | head -5; ONE_OK=0; FAIL=$((FAIL+1)); continue
+  fi
+  O=$("$OUT/one_$k" main selftest 2>&1)
+  CNT=$(printf '%s' "$O" | grep -c 'probe=BAD' || true); CNT=${CNT:-0}
+  CNT=$(printf '%s' "$CNT" | tr -d '[:space:]')
+  AT=$(printf '%s' "$O" | grep 'probe=BAD' | sed -n 's/.*\[\([0-9]\)\].*/\1/p')
+  if [ "$CNT" = "1" ] && [ "$AT" = "$k" ]; then
+    printf '    · break=%s -> 恰好 1 个 BAD 且在 [%s]\n' "$k" "$AT"
+  else
+    printf '  [FAIL] break=%s -> BAD 数=%s 位置=[%s] (应 1 个且在 [%s])\n' "$k" "$CNT" "${AT:-无}" "$k"
+    ONE_OK=0; FAIL=$((FAIL+1))
+  fi
+done
+# 🕳️ 明细行刻意【不带】[PASS] 标记: 汇总段要拿"屏幕 [PASS] 行数"与计数器
+#    对撞(见文末"三颗牙"), 任何多打一条 [PASS] 都会让对撞失败。
+#    首版这里逐条打 [PASS] => 屏幕 25 / 计数 17, 自己把自己判红。
+#    纪律: 明细是给人读的, [PASS]/[FAIL] 是给汇总对撞读的, 两者不要混用。
+if [ "$ONE_OK" = "1" ]; then
+  echo "  [PASS] 8 个探针各自独立接对符号 (无一读共享状态)"; PASS=$((PASS+1))
 fi
 
 echo
@@ -142,6 +225,8 @@ echo
 echo "================  汇总  ================"
 # 🕳️🕳️🕳️ 这个 bug 有【三颗牙】, 同一个根因: 汇总段自己的输出行只要字面含
 #    [PASS]/[FAIL], 就会被任何 `grep -c` 命中 —— 于是判据把自己当成了被测物。
+#
+#    (下面 16/15 是【事故当时的】数字, 段数后来加到 18 —— 这几条是病史不是现规格)
 #
 #    牙 1 (已修): 计数器漏掉段 0 的累加 -> 屏幕 16 条 [PASS], 计数器报 15。
 #    牙 2 (已修): `grep -c ... || echo 0` 在 BSD grep 零匹配时追加第二个 0,

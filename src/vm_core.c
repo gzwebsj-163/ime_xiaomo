@@ -23,6 +23,7 @@
 #include "hw_pin.h"
 #include "hw_dc.h"
 #include "hw_dmc.h"
+#include "hw_usbpd.h"
 #include "hw_fault.h"
 #include "hw_core.h"
 #include "hw_main.h"
@@ -1050,6 +1051,35 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
             }
             break;
         }
+        case OP_HW_USBPD_CALL: {
+            /* USB-C 快充协议采集层 (2026-10-03): dst = hw_usbpd_cmd(命令串)
+             * b = 命令串常量索引 (同 OP_HW_DMC_CALL 传参约定);
+             * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
+             *   (mo2kbc 双参内置 hw_usbpd("fmt", 数值) 的编译产物);
+             * 命令: sim|rows|tol|golden|ratio|quiet|rail|sample|dp|dm|valid|
+             *       rail_hits|ch_fail|samples|changed|last|pdpoll|selftest|help
+             * 返回: >=0 有效值 (sample/dp/dm 返【协议判定枚举】, 调用方可自证是哪一档)
+             *       / 负的 ERR_* 诚实失败 (含 ERR_FLOAT 悬空) / -1 未识别。
+             * ⚠️ 与 dmc 的 -2 help 不同: usbpd 的 help 独占 -6 (HW_USBPD_HELP),
+             *    因为 -2 已被 ERR_NODEV 占用, 一个码承载两个语义 = 两个判据都失效。 */
+            if (ins->b >= 0 && ins->b < (int)prog->const_count &&
+                prog->consts[ins->b].type == 1 && prog->consts[ins->b].sv) {
+                int rc;
+                if (ins->imm > 0 && ins->imm - 1 < KILLS_NREG) {
+                    char upbuf[512];
+                    snprintf(upbuf, sizeof(upbuf), "%s%lld",
+                             prog->consts[ins->b].sv,
+                             (long long)vm->regs[ins->imm - 1]);
+                    rc = hw_usbpd_cmd(upbuf, vm);
+                } else {
+                    rc = hw_usbpd_cmd(prog->consts[ins->b].sv, vm);
+                }
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = (int64_t)rc;
+            } else {
+                if (ins->a >= 0 && ins->a < KILLS_NREG) vm->regs[ins->a] = -1;
+            }
+            break;
+        }
         default:
             snprintf(vm->error_msg, sizeof(vm->error_msg), "unknown opcode %u at pc %u", ins->op, vm->pc);
             vm->error_count = 1; return 1;
@@ -1106,6 +1136,7 @@ static const char* kvm_opname(uint8_t op) {
     case OP_HW_PIN_CALL: return "HW_PIN_CALL";
     case OP_HW_DC_CALL: return "HW_DC_CALL";
     case OP_HW_DMC_CALL: return "HW_DMC_CALL";
+    case OP_HW_USBPD_CALL: return "HW_USBPD_CALL";
     case OP_FADD: return "FADD"; case OP_FSUB: return "FSUB"; case OP_FMUL: return "FMUL";
     case OP_FDIV: return "FDIV"; case OP_F2I: return "F2I"; case OP_I2F: return "I2F";
     default: return "?";
