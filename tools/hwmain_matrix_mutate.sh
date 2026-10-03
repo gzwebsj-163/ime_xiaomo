@@ -36,16 +36,104 @@ MAIN=src/hw/hw_main.c
 MATRIX=tools/hwmain_matrix.sh
 BK=/tmp/hwmain_mv_backup
 mkdir -p "$BK"
-cp "$STUB" "$BK/stub.c"
-cp "$MAIN" "$BK/main.c"
-cp "$MATRIX" "$BK/matrix.sh"
+
+# 🕳️🕳️🕳️ 2026-10-03 二次教训: 备份必须有【可信来源】, 不能拿磁盘现状当底本。
+#   第一版守卫只加了 DIRTY 标记 + 自动还原, 受控 A/B 立刻抓出它是【假修复】:
+#   脚本第 40 行 `cp "$MAIN" "$BK/main.c"` 无条件执行, 且发生在任何检查之前 ——
+#   上一轮被 SIGKILL 留下的污染源码, 正是被当作"干净底本"存进备份的。
+#   于是自动还原忠实地还原成了【污染版】, 污染一行没少, 看着还"成功"了。
+#   这比没有守卫更险: 它主动删掉 DIRTY 标记(=宣告"我已干净"), 然后把脏状态固化。
+#   纪律: 还原的底本必须来自【本工具无法污染的源头】。git 提交区正是这种东西 ——
+#         变异脚本从不碰它, 所以它天然是权威底本。
+#
+# 🕳️🕳️🕳️ 第三版才对的写法 (前两版都栽在同一个混淆上):
+#   第二版把「是否从 git HEAD 取底本」写成了 `git diff --quiet`(工作区是否干净)。
+#   这是两件不同的事! 工作区脏(可能正是残留变异) 恰恰是【最需要从 git 取底本】的时候,
+#   而 `git diff --quiet` 在这种情况下返回 1 -> GIT_OK=0 -> 退回磁盘现状 -> 污染被再备份一次。
+#   判据必须是【git 里有没有这个文件】, 而不是【工作区干不干净】。
+#   受控 A/B 实测: 磁盘污染 + 取底本判据 = git diff --quiet  => 还原后 md5 不变(仍假);
+#                   磁盘污染 + 取底本判据 = 文件存在于 git    => 还原后回到 HEAD 值(真)。
+GIT_OK=0
+if git rev-parse --git-dir >/dev/null 2>&1 \
+   && git cat-file -e HEAD:"$MAIN" 2>/dev/null \
+   && git cat-file -e HEAD:"$STUB" 2>/dev/null; then
+  GIT_OK=1
+fi
+
+# 工作区若还有【不属于残留变异】的改动(在 DIRTY 缺席时), 自动还原会连它一起抹掉。
+# 所以只在 DIRTY 残留时做这项判断 —— 那时工作区的脏几乎必然是残留变异。
+if [ -f "$BK/DIRTY" ] && ! git diff --quiet -- "$STUB" "$MAIN" "$MATRIX" 2>/dev/null; then
+  echo "!! 拒绝启动: 发现上一轮遗留的 DIRTY 标记, 且工作区相对 HEAD 有改动。"
+  echo "!! 自动还原会从 git HEAD 取底本覆盖磁盘 => 你的未提交改动会丢。"
+  echo "!! 处理办法(三选一):"
+  echo "!!   1) 改动已提交   -> git checkout -- $STUB $MAIN $MATRIX 后重跑"
+  echo "!!   2) 改动要保留   -> 先 git stash, 跑完变异再 git stash pop"
+  echo "!!   3) 确认只有残留 -> rm -f $BK/DIRTY 后重跑(底本走 git HEAD, 安全)"
+  exit 2
+fi
+
+# 底本来源: git HEAD (变异脚本从不碰它 = 权威), 否则退回磁盘现状
+if [ "$GIT_OK" = "1" ]; then
+  git show HEAD:"$STUB"   >"$BK/stub.c"
+  git show HEAD:"$MAIN"   >"$BK/main.c"
+  git show HEAD:"$MATRIX" >"$BK/matrix.sh" 2>/dev/null \
+    || cp "$MATRIX" "$BK/matrix.sh"   # MV5 会改判定器自身, 必须在库
+
+  # 🕳️🕳️ 第三版 A/B 才暴露出的最后一块: 底本权威了, 还原却没跟着发生。
+  #   受控 A/B 实测: 底本已是 git HEAD 的干净值(e9ef73fe), 磁盘仍停在污染值(0f2c2940)
+  #   —— 因为还原只挂在 "检测到 DIRTY" 这一个入口上。
+  #   于是场景 3(用户按提示 rm 掉 DIRTY 后重跑, 提示里本就写着"底本走 git HEAD, 安全")
+  #   落进死角: 提示承诺了安全, 代码却因为标记被删而不再还原, 带着脏基线开跑 ——
+  #   基线会红, 而那红指向"我的代码坏了", 足以让人回滚正确修复。
+  #   纪律: 提示文案承诺了什么, 代码就必须无条件兑现; 删标记不能成为绕过还原的后门。
+  if ! git diff --quiet -- "$STUB" "$MAIN" "$MATRIX" 2>/dev/null; then
+    echo "!! 检测到工作区相对 HEAD 有改动且底本可用 git HEAD, 先无条件还原再跑"
+    cp "$BK/stub.c" "$STUB"; cp "$BK/main.c" "$MAIN"
+    [ -f "$BK/matrix.sh" ] && cp "$BK/matrix.sh" "$MATRIX"
+    if git diff --quiet -- "$STUB" "$MAIN" "$MATRIX" 2>/dev/null; then
+      echo "   还原完成 (工作区已与 HEAD 一致)"
+    else
+      echo "!! 还原后仍有差异, 下面这些文件本轮不受变异保护:"
+      git diff --name-only -- "$STUB" "$MAIN" "$MATRIX" | sed 's/^/     /'
+    fi
+  fi
+else
+  cp "$STUB" "$BK/stub.c"; cp "$MAIN" "$BK/main.c"; cp "$MATRIX" "$BK/matrix.sh"
+fi
 
 KILLED=0; SURVIVED=0; BROKEN=0
 
-restore() { cp "$BK/stub.c" "$STUB"; cp "$BK/main.c" "$MAIN"; cp "$BK/matrix.sh" "$MATRIX"; }
+restore() {
+  cp "$BK/stub.c" "$STUB"; cp "$BK/main.c" "$MAIN"; cp "$BK/matrix.sh" "$MATRIX"
+  # 只有"本次运行确实动过手"才允许删标记。删不掉 = 上一轮崩溃留下的,
+  # 必须留着让下次启动时报警, 绝不能静默当作干净状态。
+  rm -f "$BK/DIRTY" 2>/dev/null || true
+}
 # MV5 改的是【判定器自己】, 所以 trap 的兜底还原必须也覆盖它 ——
 # 否则一旦中途异常退出, 磁盘上留下的是被打坏的矩阵, 而脚本却报告"已还原"。
+#
+# 🕳️🕳️🕳️ 2026-10-03 实战教训 (信号覆盖不足 = 变异会污染源码树):
+#   `trap restore EXIT` 只覆盖【正常退出】和 SIGTERM。SIGKILL 兜不住 ——
+#   没有任何进程内代码能在 SIGKILL 后执行。而外部超时 kill 走的正是 SIGKILL。
+#   本轮就这样把 MV7 留在了 src/hw/hw_main.c 里, 后续 make test 一片红。
+#   受控 A/B 实测: SIGTERM -> 文件已还原; SIGKILL -> 文件仍 DIRTY。
+#   纪律: 写盘的工具进程, 兜底必须【跨进程】, 不能只靠 trap。
 trap restore EXIT
+trap 'restore; exit 130' INT
+trap 'restore; exit 143' TERM
+trap 'restore; exit 129' HUP
+trap 'restore; exit 137' QUIT
+
+# 跨进程兜底: 每次注入前落一枚 DIRTY 标记, 还原时删掉。
+# 下一轮启动若发现标记还在, 说明上一轮被 SIGKILL 打断且没还原 ——
+# 此时【先自动还原再跑基线】, 而不是带着脏变异继续 (基线会红, 但那红是假的,
+# 会让人误以为是自己的新代码坏了, 从而回滚正确修复 —— 本轮差一步就这么干)。
+if [ -f "$BK/DIRTY" ]; then
+  echo "!! 警告: 发现上一轮遗留的 DIRTY 标记, 磁盘可能残留变异"
+  echo "!! 自动从备份还原后再继续 (备份: $BK)"
+  restore
+fi
+touch "$BK/DIRTY"   # 从此刻起, 任何时刻被 SIGKILL 都留痕
 
 # 还原后必须复跑基线, 确认 18/0 才是真基线 (防"带着脏变异跑基线")
 echo "### 基线 (还原态) ###"

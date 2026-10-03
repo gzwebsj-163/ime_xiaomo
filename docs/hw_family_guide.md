@@ -69,7 +69,7 @@ hw 相关代码里有**两个都会被叫作"家族数字"的值**，极易混�
 
 | 值 | 归属 | 谁算的 | 怎么查 |
 |---|---|---|---|
-| `0x5FAD755A` | **xiaomo hw 家族**总线注册表 | `hw_main_checksum()` | `./xiaomo main sum` |
+| `0xA57E74DF` | **xiaomo hw 家族**总线注册表 | `hw_main_checksum()` | `./xiaomo main sum` |
 | `0x116FD00A` | **烧录器门面** `xfl_hw.c` 聚合指纹 | 门面运行时聚合 16 条探针 | `~/cow/xiaomo-flasher/xiaomo-flash hw` |
 
 **`0x116FD00A` 不是编译期常量**——它在 `xfl_hw.c` 和 `include/*.h` 里 `grep` 零命中，因为它是**运行时把 16 条探针的实测值聚合出来的**。门面登记表见 `xiaomo-flasher/src/xfl_hw.c:64` 的 `g_mods[]`。
@@ -77,7 +77,7 @@ hw 相关代码里有**两个都会被叫作"家族数字"的值**，极易混�
 **"14 模块"的真实构成**（门面视角，非 xiaomo 家族视角）：
 
 ```
-8 个 hw_main 注册模块（asr/core/dev/direct/fault/hex/oem/token）
+9 个 hw_main 注册模块（asr/core/dev/direct/fault/hex/oem/token/usbpd）
   + 6 个新模块及子表项（pin/pin.ISP/flash/dc/dc.proto/wdbg）
   = 14 条登记，16 条探针
 ```
@@ -174,7 +174,7 @@ void hw_dc_bsp_install(const hw_dc_bsp_t* bsp);  /* NULL = 卸载回模拟 */
 
 ## 第 3 章 公共基础：注册表 hw_main
 
-`hw_main.c`（548 行）是**家族总线**：把 8 个早期模块挂进统一注册表，提供统一的健康探针和命令分发。
+`hw_main.c`（548 行）是**家族总线**：把 9 个早期模块挂进统一注册表，提供统一的健康探针和命令分发。
 
 ### 3.1 注册表实测内容
 
@@ -183,7 +183,7 @@ $ ./xiaomo main card
 === hw_main 类注册表 (hw 家族总调度) ===
 count  : 8
 mode   : HOST (0)
-golden : 0x5FAD755A OK
+golden : 0xA57E74DF OK
   [0] ASR    cls=0x0058  probe=OK
   [1] CORE   cls=0x0098  probe=OK
   [2] DEV    cls=0x0089  probe=OK
@@ -221,12 +221,12 @@ wdbg  : 0
 ```
 
 **含义**：
-- `hw_main count` 报 8，**不代表家族只有 8 个模块**，只代表挂了 8 个。
+- `hw_main count` 报 9，**不代表家族只有 9 个模块**，只代表挂了 9 个。
 - 新模块走**自己的 CLI + 自己的 opcode**，不进注册表。这是**当前的设计现状，不是 bug**——但它意味着 `hw_main probeall` **测不到新 5 模块**。
 - 想让全家族统一体检，得挨个跑 6 个模块的 selftest。
 
 > 📌 **是否该把新 5 模块补进注册表，取决于你的目标**：
-> - **补**的好处：`probeall` 一次看全家族健康；坏处：要动已定版的类 ID 表和黄金值 `0x5FAD755A`。
+> - **补**的好处：`probeall` 一次看全家族健康；坏处：要动已定版的类 ID 表和黄金值 `0xA57E74DF`。
 > - **不补**的现状：新模块各自 `card`/`selftest`，已能覆盖，只是没有统一入口。
 >
 > **本文只记录现状，不替你做这个决定。**
@@ -249,10 +249,10 @@ wdbg  : 0
 
 ```
 $ ./xiaomo main sum
-0x5FAD755A
+0xA57E74DF
 ```
 
-`HW_MAIN_GOLDEN = 0x5FAD755Au`，= 类表 FNV-1a-32。改动类表必须重算。
+`HW_MAIN_GOLDEN = 0xA57E74DFu`，= 类表 FNV-1a-32。改动类表必须重算。
 
 ---
 
@@ -476,7 +476,7 @@ L3  真机 PASS       Phase A 确定性 + Phase B 真硅  ← 动 BSP/时序必�
 
 ```bash
 # 家族黄金
-./xiaomo main sum          # 应 0x5FAD755A
+./xiaomo main sum          # 应 0xA57E74DF
 # 各模块黄金
 ./xiaomo dmc golden
 ./xiaomo flash md5
@@ -694,7 +694,7 @@ CLI 只取 `argv[2]` ⇒ `load w25q` 截成 `load` 后**静默 exit 1**。家族
 
 | 宏 | 值 | 含义 | 定义位置 | 实跑复核 |
 |---|---|---|---|---|
-| `HW_MAIN_GOLDEN` | `0x5FAD755A` | 家族类表 FNV-1a-32 | `src/hw/hw_main.c:34` | `main sum` |
+| `HW_MAIN_GOLDEN` | `0xA57E74DF` | 家族类表 FNV-1a-32 | `src/hw/hw_main.c:34` | `main sum` |
 | `HW_FLASH_GOLDEN` | `0xAF05978A` | ROM 命令表 FNV-1a-32 | `include/hw_flash.h:104` | `flash md5` |
 | `HW_PIN_GOLDEN` | `0x9E0F10FA` | 引脚档案表 FNV-1a-32 | `include/hw_pin.h:180` | `pin card` |
 | `HW_PIN_ISP_GOLDEN` | `0xD2A9A924` | ISP 命令表（11 条）FNV-1a-32 | `include/hw_pin.h:181` | `pin card` |
@@ -717,7 +717,7 @@ CLI 只取 `argv[2]` ⇒ `load w25q` 截成 `load` 后**静默 exit 1**。家族
 
 **本次实跑复核结果**（2026-10-02）：
 ```
-$ ./xiaomo main sum        → 0x5FAD755A          ✅
+$ ./xiaomo main sum        → 0xA57E74DF          ✅
 $ ./xiaomo dmc golden      → golden=0x169A603E expect=0x169A603E OK  ✅
 $ ./xiaomo dc sig 0        → sig cksum = 0x028EECE6 (golden OK)      ✅
 $ xiaomo-flash hw -v       → 家族指纹 0x116FD00A 已检 10 项, 失败 0    ✅
@@ -733,7 +733,7 @@ $ xiaomo-flash hw -v       → 家族指纹 0x116FD00A 已检 10 项, 失败 0  
 # 家族总线
 ./xiaomo main card          # 注册表卡片
 ./xiaomo main selftest      # 家族自检
-./xiaomo main sum           # 家族黄金 → 0x5FAD755A
+./xiaomo main sum           # 家族黄金 → 0xA57E74DF
 ./xiaomo main probeall      # 全注册表探针
 ./xiaomo main find 152      # cls → 表序
 
