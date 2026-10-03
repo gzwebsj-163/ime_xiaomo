@@ -68,3 +68,5 @@ firmware/**/tmp/
 firmware/**/wifi_cfg.h
 firmware/**/*secret*
 firmware/**/*credential*
+
+# 说明行: wifi_cfg.h 含明文 WiFi 密码, 由 pre-commit 守卫兜底拦截
