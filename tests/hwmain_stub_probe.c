@@ -12,6 +12,10 @@
  * ------------------------------------------------------------------ */
 #include <string.h>
 #include "hw_main.h"
+/* 🔴 桩必须 include【真头】usbpd/include/hw_usbpd.h, 不能抄被测物的签名。
+ *    放在下方 extern "C" 【之外】 —— 真头自带 linkage 守卫(其 39-40 行),
+ *    与 hw_main.c 的做法一致; 若放进 extern "C" 内则出现嵌套 extern "C"。 */
+#include "hw_usbpd.h"
 
 /* 🕳️ 双形态对拍必踩: 桩被复制成 .cpp 编译时, 桩函数会被 C++ mangle
  *    成 __Z10hw_oem_sigv, 而 hw_main.c 里的弱声明是【C 链接】的
@@ -69,9 +73,26 @@ unsigned int hw_dev_registered(void) { return 1; }
 const char* hw_get_error(void) { return ""; }
 
 /* USBPD: 唯一真表出口, 指针非 NULL 且 n>=4 (与 selftest [1] 同判据) */
-const void* hw_usbpd_qc_table(int* n_rows)
+/* 🔴 首版这里写的是 `const void* hw_usbpd_qc_table(int*)` —— 与 hw_main.c 里的
+ *    抹型弱声明【同型】, 于是二者互相"合法", 冲突永远暴露不出来:
+ *    桩跟着被测物一起错, 对拍就成了一台复印机。
+ *    纪律: 桩的签名必须锚定【真头】(usbpd/include/hw_usbpd.h), 不能抄被测物。
+ *    锚定后本桩与真模块可互换(真模块也 include 真头), 差在只有 4 行。
+ *
+ * 🕳️ 第二版写的是 `{{0,0,0,0,0,0}}` —— 6 个初值是【猜的】, 真结构只有
+ *    3 个字段 (dp/dm/v)。因为值不被解引用, 编译器对多余初值只告警不报错,
+ *    差一点就带着"看起来能跑"的姿态混进矩阵。
+ *    现改【指定初始化器】: 字段一旦改名或删除, 桩【编译失败】。
+ *    纪律: 选一个能当金丝雀的写法 —— {0} 只保证"能编译", 指定初始化器
+ *    才保证"字段还对得上"。 */
+const hw_usbpd_qc_row_t* hw_usbpd_qc_table(int* n_rows)
 {
-    static const int tbl[16] = {0};
+    static const hw_usbpd_qc_row_t tbl[4] = {
+        { .dp = 0, .dm = 0, .v = HW_USBPD_UNKNOWN },
+        { .dp = 0, .dm = 0, .v = HW_USBPD_UNKNOWN },
+        { .dp = 0, .dm = 0, .v = HW_USBPD_UNKNOWN },
+        { .dp = 0, .dm = 0, .v = HW_USBPD_UNKNOWN },
+    };   /* 只需非空 + 行数>=4; 探针从不解引用, 故取值无关 */
     if (n_rows) *n_rows = 4;
     return tbl;
 }

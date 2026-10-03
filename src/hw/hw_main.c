@@ -101,14 +101,47 @@ extern const char*  hw_get_error(void) __attribute__((weak));
 extern unsigned long long hw_oem_sig(void) __attribute__((weak));
 extern char*        hw_hex_fmt64(unsigned long long, char*, int) __attribute__((weak));
 extern unsigned long long hw_hex_parse64(const char*) __attribute__((weak));
-/* hw_usbpd 唯一真表出口。签名锚定 (include/hw_usbpd.h)。
- * 🕳️ 这里刻意【不】#include "hw_usbpd.h": 与家族其余探针同款只声明用到的弱符号,
- *    真机固件裁剪掉 usbpd/ 时头可能不存在, 且本文件只需指针非空 + 行数。
- *    本探针【不解引用】返回的表指针, 因此不依赖结构体布局是否一致。 */
-extern const void*  hw_usbpd_qc_table(int* n_rows) __attribute__((weak));
+/* hw_usbpd 唯一真表出口。
+ * ✅ 直接 include 真头, 不再手抄弱声明。理由与代价都记在这里:
+ *
+ * 1) 曾经"刻意不 include 真头"的两条理由, 逐条核过:
+ *    (a) "真机裁剪 usbpd/ 时头可能不存在" —— 当前根 Makefile 里
+ *        -Iusbpd/include 与 usbpd/src 下的 .c 都是【无条件】的, 头随源码一起在,
+ *        此理由在当前构建下不成立(它是个假想约束, 不是事实)。
+ *        ⚠️ 将来若真做条件裁剪, 本文件的 #include 必须同步加守卫。
+ *    (b) "探针不解引用, 不依赖结构体布局" —— 依然成立, 且被保留:
+ *        下面 main_probe_usbpd 只读【指针非空 + 行数】, 从不解引用。
+ * 2) 但 (b) 曾被顺手推成"把返回类型抹成 const void*", 那不是 (b) 的推论, 是【真错】。
+ *    编译器权威判据(可复现, gcc/g++ 一致):
+ *      error: functions that differ only in their return type cannot be overloaded
+ *      note: previous declaration is here
+ *      const hw_usbpd_qc_row_t* hw_usbpd_qc_table(int* n_rows);
+ *    只要有 TU 同时看到本声明与真头, 就是硬错误。
+ * 3) 曾试过"不 include 真头 + 不完整类型前置"来两头兼顾, 【实测行不通】:
+ *    真实类型是 `typedef struct { ... } hw_usbpd_qc_row_t;` —— 匿名结构体,
+ *    tag 已被 typedef 名占用。任何 `struct hw_usbpd_qc_row_t;` 前置在 C++ 下
+ *    报 "definition of type conflicts with typedef of the same name"。
+ *    即: 【缺头就精确复述该返回类型】在 C/C++ 里做不到 —— (b) 与"类型不撒谎"互斥。
+ *    所以取舍只能是: 要么类型撒谎(抹型), 要么 include 真头。本处选后者。
+ * 4) 🔴 真正必须手抄的东西是【weak 属性】, 不是类型。兄弟头一律不带 weak
+ *    (与家族其余探针同款), 弱性一向靠本文件的 weak 声明提供。
+ *    include 真头后若不同步补回 weak, 符号会退回【强引用】, 编译器立刻报
+ *      warning: comparison of function 'hw_usbpd_qc_table' equal to a
+ *               null pointer is always false [-Wtautological-pointer-compare]
+ *    即探针的 NOLINK 分支结构性失效, 裁剪构建也会链接失败。
+ *    故: include 真头之后, 用【与真头逐字相同的签名】把 weak 补回来。
+ *    签名与真头重复是刻意的 —— 一旦哪边改了, 编译器立刻报 conflicting types,
+ *    不会像抹型那样静默蒙混过去。
+ * 5) include 真头的前提: 本文件是 C++(家族 .c 一律 c++17 编译), 故真头里的
+ *    C++ 语法安全; 若未来某兄弟头引入 C++ 特有语法, 这里会当场编译失败而非静默。
+ *    本 include 必须在 extern "C" 【之外】(见下方), 头自会带自己的 linkage。
+ */
 #ifdef __cplusplus
 }
 #endif
+#include "hw_usbpd.h"
+/* 补回 weak —— 签名须与 include/hw_usbpd.h 逐字一致(改动任一边都会编译报错) */
+extern const hw_usbpd_qc_row_t* hw_usbpd_qc_table(int* n_rows) __attribute__((weak));
 
 /* ---- 各类健康探针 (无副作用; 未链接 → HW_MAIN_RC_NOLINK) ---- */
 static int main_probe_asr(void)
@@ -161,7 +194,7 @@ static int main_probe_token(void)
 static int main_probe_usbpd(void)
 {
     int n = 0;
-    const void* t;
+    const hw_usbpd_qc_row_t* t;   /* 真头类型; 仍只判【非空+行数】, 从不解引用 */
     if (hw_usbpd_qc_table == 0) return HW_MAIN_RC_NOLINK;
     t = hw_usbpd_qc_table(&n);
     return (t != 0 && n >= 4) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;
