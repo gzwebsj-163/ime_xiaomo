@@ -30,8 +30,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* 黄金校验和: 类表 (name+cls) FNV-1a-32, Python 对拍锁定 (2026-09-28) */
-#define HW_MAIN_GOLDEN 0x5FAD755Au
+/* 黄金校验和: 类表 (name+cls) FNV-1a-32, Python 对拍锁定。
+ * 2026-10-03 登记 USBPD 后由 0x5FAD755A 变更为 0xA57E74DF。
+ * 🕳️ 换算法/改类表必须重算, 且必须用【独立 Python】复算 —— 先让 Python
+ *    复现旧值 0x5FAD755A 自证口径正确, 再让它算新值。 */
+#define HW_MAIN_GOLDEN 0xA57E74DFu
 
 /* ============================================================
  * 1. 编译期模式探测 (全跨式)
@@ -98,6 +101,11 @@ extern const char*  hw_get_error(void) __attribute__((weak));
 extern unsigned long long hw_oem_sig(void) __attribute__((weak));
 extern char*        hw_hex_fmt64(unsigned long long, char*, int) __attribute__((weak));
 extern unsigned long long hw_hex_parse64(const char*) __attribute__((weak));
+/* hw_usbpd 唯一真表出口。签名锚定 (include/hw_usbpd.h)。
+ * 🕳️ 这里刻意【不】#include "hw_usbpd.h": 与家族其余探针同款只声明用到的弱符号,
+ *    真机固件裁剪掉 usbpd/ 时头可能不存在, 且本文件只需指针非空 + 行数。
+ *    本探针【不解引用】返回的表指针, 因此不依赖结构体布局是否一致。 */
+extern const void*  hw_usbpd_qc_table(int* n_rows) __attribute__((weak));
 #ifdef __cplusplus
 }
 #endif
@@ -147,6 +155,17 @@ static int main_probe_token(void)
     if (hw_token_selftest == 0) return HW_MAIN_RC_NOLINK;
     return (hw_token_selftest(NULL) == 0) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;
 }
+/* 🕳️ 探针必须有区分力 (锚点 H: 恒真信号比假信号更险, 因为它让你"有依据地"放心)。
+ *   这里取的是 selftest [1] 的同款判据 (真表非塌: 指针非 NULL 且 n >= 4),
+ *   所以判据表被掏成空/塌行时 `xiaomo main probeall` 会真的报 BAD, 而不是恒绿。 */
+static int main_probe_usbpd(void)
+{
+    int n = 0;
+    const void* t;
+    if (hw_usbpd_qc_table == 0) return HW_MAIN_RC_NOLINK;
+    t = hw_usbpd_qc_table(&n);
+    return (t != 0 && n >= 4) ? HW_MAIN_RC_OK : HW_MAIN_RC_BAD;
+}
 
 /* ============================================================
  * 3. 类注册表 (黄金校验和保护)
@@ -165,7 +184,8 @@ static const hw_main_ent_t g_classes[HW_MAIN_CLASS_MAX] = {
     { "FAULT",  (int)FAULT_CLASS,  main_probe_fault  },
     { "HEX",    (int)HEX_CLASS,    main_probe_hex    },
     { "OEM",    (int)OEM_CLASS,    main_probe_oem    },
-    { "TOKEN",  (int)TOKEN_CLASS,  main_probe_token  }
+    { "TOKEN",  (int)TOKEN_CLASS,  main_probe_token  },
+    { "USBPD",  (int)USBPD_CLASS,  main_probe_usbpd  }
 };
 
 /* 各类静态信息 (xxx_class() 返回 const int[4] = {cls, idx, mode, probe}) */
@@ -296,6 +316,11 @@ const int* token_class(int* args)
     return main_info_fill(HW_CLASS_TOKEN, args != NULL && args[0] == 1);
 }
 
+const int* usbpd_class(int* args)
+{
+    return main_info_fill(HW_CLASS_USBPD, args != NULL && args[0] == 1);
+}
+
 /* ============================================================
  * 5. 上电初始化 + 字符串命令分发 (VM/CLI 同路)
  * ============================================================ */
@@ -328,8 +353,15 @@ int hw_main_cmd(const char* cmd, void* arg)
     if (sscanf(cmd, "%15s %ld", op, &val) < 1) return -1;
     if (strcmp(op, "count") == 0) return (int)HW_MAIN_CLASS_MAX;
     if (strcmp(op, "sum") == 0)
+        /* 🕳️ 此处曾有 (int)(HW_MAIN_GOLDEN & 0x7FFFFFFFu) —— 摘掉掩码的同款病:
+         *   旧黄金 0x5FAD755A < 2^31 时掩码是静默空操作, 登记 USBPD 后黄金
+         *   0xA57E74DF 跨过 2^31, 掩码立刻生效, cmd 出口与 selftest/CLI 内部
+         *   两个出口对同一份数据给出不同值 (实测 .mo 侧 0x257E74DF vs 真值
+         *   0xA57E74DF)。与 hw_dmc.c:1150 记录的"曾踩"完全同型, 修法同款:
+         *   cmd 出口直接给宏本身, 再加一条双出口一致性护栏把它钉死。
+         *   注: 黄金 ≥ 2^31 时 (int) 是负数, 这是如实回传, 不是新 bug。 */
         return (hw_main_checksum() == HW_MAIN_GOLDEN)
-             ? (int)(HW_MAIN_GOLDEN & 0x7FFFFFFFu) : -1;
+             ? (int)(HW_MAIN_GOLDEN) : -1;
     if (strcmp(op, "ok") == 0)
         return (hw_main_checksum() == HW_MAIN_GOLDEN) ? 1 : 0;
     if (strcmp(op, "mode") == 0) return (int)hw_main_mode();
@@ -383,7 +415,8 @@ int hw_main_selftest(int (*putf)(const char*))
     {
         static const int ids[HW_MAIN_CLASS_MAX] = {
             (int)ASR_CLASS, (int)CORE_CLASS, (int)DEV_CLASS, (int)DIRECT_CLASS,
-            (int)FAULT_CLASS, (int)HEX_CLASS, (int)OEM_CLASS, (int)TOKEN_CLASS
+            (int)FAULT_CLASS, (int)HEX_CLASS, (int)OEM_CLASS, (int)TOKEN_CLASS,
+            (int)USBPD_CLASS
         };
         int ok3 = 1;
         for (i = 0; i < HW_MAIN_CLASS_MAX; i++) {
@@ -400,7 +433,8 @@ int hw_main_selftest(int (*putf)(const char*))
     /* [4] 类名表序 */
     {
         static const char* const names[HW_MAIN_CLASS_MAX] = {
-            "ASR", "CORE", "DEV", "DIRECT", "FAULT", "HEX", "OEM", "TOKEN"
+            "ASR", "CORE", "DEV", "DIRECT", "FAULT", "HEX", "OEM", "TOKEN",
+            "USBPD"
         };
         int ok4 = 1;
         for (i = 0; i < HW_MAIN_CLASS_MAX; i++)
@@ -461,6 +495,11 @@ int hw_main_selftest(int (*putf)(const char*))
         if (hw_main_cmd("find 152", 0) != (int)HW_CLASS_CORE) ok8 = 0;  /* 152 = 0x98 */
         if (hw_main_cmd("probe 152", 0) != HW_MAIN_RC_OK) ok8 = 0;     /* 宿主 core 健康 */
         if (hw_main_cmd("bogus", 0) != -1) ok8 = 0;
+        /* 🕳️ 双出口一致性 (掩码坑的回归护栏, 修法同 hw_dmc.c [19]):
+         *   cmd 出口必须与 HW_MAIN_GOLDEN 宏【逐位相等】, 不得再掩 0x7FFFFFFF。
+         *   这条断言在旧黄金 (0x5FAD755A < 2^31) 下恒真 = 不具区分力的信号,
+         *   正是它当初没抓到这个 bug 的原因; 黄金跨 2^31 后才具备区分力。 */
+        if (hw_main_cmd("sum", 0) != (int)HW_MAIN_GOLDEN) ok8 = 0;
         if (!ok8) fails++;
         snprintf(line, sizeof(line), "hwmain: [8] cmd dispatch %s", ok8 ? "OK" : "FAIL");
         main_puts_or(putf, line);

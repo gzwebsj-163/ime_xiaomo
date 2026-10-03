@@ -893,7 +893,7 @@ int kvm_run(KillsVM* vm, const KillsProgram* prog) {
              * b = 命令串常量索引 (同 OP_HW_DEV/CORE_CALL 传参约定);
              * imm > 0 → 寄存器 (imm-1) 的十进制值动态追加到命令串尾
              *   (mo2kbc 双参内置 hw_main("fmt", 数值) 的编译产物);
-             * 命令: count=8 / sum=1604573786(黄金)/ ok=1 / idx N=类ID /
+             * 命令: count=9 / sum=(int)黄金(≥2^31 时为负) / ok=1 / idx N=类ID /
              *        find ID=表序 / probe ID=探针结果 / probeall / selftest;
              * 返回: >=0 结果 / -1 未识别 (uint8 回绕 → 255)。 */
             if (ins->b >= 0 && ins->b < (int)prog->const_count &&

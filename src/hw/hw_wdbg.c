@@ -181,6 +181,7 @@ static uint8_t  g_spi_mode;       /* SPI 当前 Mode (0..3) */
  *    属契约脆弱无现行触发点, 靠人工审阅必然漏判。 */
 static hw_wdbg_bsp_t   g_bsp;             /* 全零 = 用默认模拟器 */
 static int             g_bsp_set;         /* 0 = 未装 (走 g_sim_bsp) */
+static hw_wdbg_bsp_t  *g_bad_bsp_ptr;     /* 🕳️ 仅供 [18b] 阴性对照臂: 模拟有缺陷的「只存指针」实现 */
 
 /* ---- 注入用确定值 (模拟器侧可编排, 便于 selftest/回归) ---- */
 static uint32_t g_inj_pwm_hz;
@@ -830,17 +831,89 @@ int hw_wdbg_cmd(const char* cmd, void* ctx)
 /* ============================================================
  * 11. 自检 (全跨式黄金锁定)
  * ============================================================ */
-#define WDBG_CHECK(cond) do { if (!(cond)) fails++; } while (0)
+/* 🕳️ 2026-10-03 真机首跑 Phase A 报 fails=1, 而这个宏原本**只加计数不报是哪一条**
+ *   ⇒ 「先怀疑用例」这条纪律在缺少行号时根本没法执行 (不知道该怀疑哪一条)。
+ *   改成留痕 + 访问器导出。
+ *   ⚠️ 刻意**不**在这里调 ESP_LOGE: 本模块零平台依赖 (宿主/xiaomo 六模式都要编),
+ *     esp_log.h 不在其中, 直接用会炸掉全跨矩阵。诊断信息经访问器交给平台侧打印。 */
+#define HW_WDBG_FAIL_MAX 8
+static uint32_t g_fail_line[HW_WDBG_FAIL_MAX];   /* 失败断言所在行号 */
+static uint32_t g_fail_line_n;
+static int      g_bad_probe_failed;             /* 🕳️ [18b] 阴性对照臂实测: 1=缺陷实现确实被抓到 */
+static int      g_dangle_pos;                    /* [18] 阳性臂实测: 1=拷副本实现扛住了踩栈 */
+
+#define WDBG_CHECK(cond) do { if (!(cond)) { fails++; \
+        if (g_fail_line_n < (uint32_t)HW_WDBG_FAIL_MAX) \
+            g_fail_line[g_fail_line_n++] = (uint32_t)__LINE__; } } while (0)
+
+/* 失败行号访问器 (i < count 时返回行号, 否则 0) */
+uint32_t hw_wdbg_selftest_failline(uint32_t i)
+{
+    return (i < g_fail_line_n) ? g_fail_line[i] : 0u;
+}
+uint32_t hw_wdbg_selftest_failcount(void) { return g_fail_line_n; }
+int      hw_wdbg_dangle_pos(void) { return g_dangle_pos; }
+int      hw_wdbg_dangle_neg(void) { return g_bad_probe_failed; }
 
 /* ---- [18] 判别性实验: 证明 bsp_install 若只存指针则必然悬垂 ----
- * 刻意「不」加 noinline/优化屏障以外的花招: 就是要让栈真的被复用。 */
-static hw_wdbg_bsp_t* wd_install_stack_bsp(void)
+ * 刻意「不」加 noinline/优化屏障以外的花招: 就是要让栈真的被复用。
+ *
+ * 🕳️🔴 2026-10-03 首次真机跑: 本条**宿主过、S3 挂**(fails=1, 行号定位到断言处),
+ *   根因**不在被测代码而在夹具**。原写法是
+ *       p_local = wd_install_stack_bsp();   ← 子函数返回 &local
+ *       hw_wdbg_bsp_install(p_local);       ← ★ 此时对象已经死了
+ *   install 执行的 `g_bsp = *bsp` 是在**解引用一个已结束生命周期的对象**
+ *   = C 标准明文的未定义行为。编译器有权做任何事: 宿主上恰好还活着,
+ *   Xtensa -O2 上就没保住 ⇒ 判据测的是「读已死对象」, 这比它想测的契约
+ *   (「install 之后调用方返回, 存下来的指针还活着吗」) **更强也更病态**。
+ *
+ *   改成精确建模**真实触发场景**, 三步且全程无 UB:
+ *     ① 在**子函数自己的栈帧**里建 BSP 并 install —— 对象此刻有效 (无 UB),
+ *        且子函数返回后该帧消亡, 正好模拟「调用方返回」;
+ *     ② 记下 install 后读到的 uart_write;
+ *     ③ 另一个**同深度**的子函数去踩那片栈, 再回读 g_bsp。
+ *   存指针的实现: 帧已消亡又被踩 ⇒ 读出垃圾 ⇒ != saved_wp ⇒ FAIL
+ *   拷副本的实现: g_bsp 在静态存储 ⇒ 必仍是 saved_wp ⇒ PASS
+ *   踩栈必须来自**另一个子函数**而不是就地: 同函数的局部量活在调用者帧里,
+ *   踩栈够不到, 那样写等于没踩 (判据空转)。 */
+typedef int (*wd_uart_wr_fn)(const uint8_t*, uint32_t);
+
+static wd_uart_wr_fn wd_install_in_own_frame(void)
 {
-    hw_wdbg_bsp_t local;                 /* ★ 栈上临时体, 返回即失效 */
+    hw_wdbg_bsp_t local;               /* ★ 本函数栈帧上的临时体, 返回即消亡 */
     memset(&local, 0, sizeof(local));
     local.uart_write = wd_stub_uart_write;
-    return &local;
+    hw_wdbg_bsp_install(&local);       /* ★ 对象此刻有效 ⇒ `*bsp` 不是 UB */
+    return g_bsp.uart_write;           /* 拷副本时必 == wd_stub_uart_write */
 }
+
+/* 🕳️ 2026-10-03: 修复后的夹具必须自证**有判别力**, 否则「测试通过」什么也说明不了。
+ *   本函数模拟**有缺陷**的实现 (只存指针不拷副本), 跑完全同样的三步。
+ *   期望: FAIL —— 帧消亡 + 被踩 ⇒ 读出垃圾。实测 FAIL 才说明上面那条 PASS
+ *   是「因为拷了副本」而不是「因为夹具够不着那片栈」。
+ *
+ *   ⚠️ 这里**故意**去存一个即将消亡的局部变量地址, 所以 GCC 13 的
+ *   -Wdangling-pointer= 会直接报错 (实测: 原写法在编译期就被判 UB, 从编译期
+ *   坐实了「宿主过、S3 挂」的根因是夹具而非被测代码)。
+ *   本函数做的就是「把那个有缺陷的实现搬进来跑一遍」, 故精确抑制该警告;
+ *   抑制范围仅限本函数, 其余代码一处不放过。 */
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdangling-pointer="
+#endif
+static wd_uart_wr_fn wd_probe_pointer_impl_would_fail(void)
+{
+    hw_wdbg_bsp_t local;
+    memset(&local, 0, sizeof(local));
+    local.uart_write = wd_stub_uart_write;
+    /* 有缺陷版: g_ptr = bsp (不拷), 此刻对象有效 ⇒ 这里本身没有 UB;
+     * 悬垂是「函数返回后」才发生的事, 正是本实验要观察的现象。 */
+    g_bad_bsp_ptr = &local;
+    return g_bad_bsp_ptr->uart_write;   /* 此刻必 == wd_stub_uart_write */
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
 
 /* 占掉同一片栈并写满垃圾 (深度 + 广度都盖住, 逼编译器真发栈) */
 static volatile uint32_t g_clobber_sink;
@@ -866,6 +939,9 @@ int hw_wdbg_selftest(int (*putf)(const char*))
     hw_wdbg_stat_t st;
     uint32_t i;
 
+    g_fail_line_n = 0;              /* 留痕清零: selftest 可被多次调用 */
+    g_bad_probe_failed = 0;
+    g_dangle_pos = 0;
     hw_wdbg_init(NULL);
 
     /* [1] 黄金校验和锁定 (默认线序表) */
@@ -1027,15 +1103,27 @@ int hw_wdbg_selftest(int (*putf)(const char*))
      *   注: 真机固件 hw_wdbg_diag.c:141 传的是 static const 全局, 故现网
      *   「恰好」不炸 —— 契约脆弱但无现行触发点, 靠人工审阅极易漏判。 */
     {
-        int (*saved_wp)(const uint8_t*, uint32_t);
-        hw_wdbg_bsp_t* p_local = wd_install_stack_bsp();
-        hw_wdbg_bsp_install(p_local);
-        saved_wp = g_bsp.uart_write;
-        wd_clobber_stack();                      /* 占掉刚才那片栈 */
-        /* 拷副本的实现: g_bsp 是静态副本, 必仍是 saved_wp
-         * 存指针的实现: 那片栈已被踩, g_bsp.uart_write 变成别的东西 → != saved_wp */
+        wd_uart_wr_fn saved_wp = wd_install_in_own_frame();
+        wd_clobber_stack();             /* ★ 另一个子函数去踩同一片栈 */
+        /* 拷副本的实现: g_bsp 在静态存储, 必仍是 saved_wp
+         * 存指针的实现: 那片栈已被消亡+踩过, g_bsp.uart_write 变成别的东西 → != saved_wp */
         WDBG_CHECK(g_bsp_set && g_bsp.uart_write == saved_wp);
+        g_dangle_pos = (g_bsp_set && g_bsp.uart_write == saved_wp) ? 1 : 0;
         hw_wdbg_bsp_install(NULL);
+
+        /* [18b] 🕳️ 夹具自证: 阴性对照臂 —— 同样的三步跑在**有缺陷**的「只存指针」
+         *   实现上, 必须 FAIL。若它也 PASS, 说明夹具够不着那片栈 / 编译器把对象
+         *   提去了别处 ⇒ 上面 [18] 的 PASS 是假通过, 不能作数。
+         *   这里**故意不计入 fails**: 期望值就是 FAIL, 计入等于要求缺陷出现。
+         *   但必须把实测结果留给平台侧, 否则「期望 FAIL」又变成不可证伪的口号。 */
+        {
+            wd_uart_wr_fn bad_saved = wd_probe_pointer_impl_would_fail();
+            wd_uart_wr_fn bad_after;
+            wd_clobber_stack();
+            bad_after = g_bad_bsp_ptr->uart_write;   /* ★ 此刻该帧已消亡+被踩 */
+            g_bad_probe_failed = (bad_after != bad_saved);
+            g_bad_bsp_ptr = NULL;
+        }
     }
 
     if (fails == 0) {

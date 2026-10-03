@@ -266,9 +266,11 @@ fi
 
 # ---- hw_main 家族总调度 (2026-09-28) ----
 mn_out=$("$BIN" main 2>&1); mn_rc=$?
-if [ $mn_rc -eq 0 ] && echo "$mn_out" | grep -q "golden : 0x5FAD755A OK" \
+if [ $mn_rc -eq 0 ] && echo "$mn_out" | grep -q "golden : 0xA57E74DF OK" \
    && echo "$mn_out" | grep -q "\[0\] ASR" && echo "$mn_out" | grep -q "\[7\] TOKEN" \
-   && echo "$mn_out" | grep -q "cls=0x0098" && echo "$mn_out" | grep -q "cls=0x0EFD"; then
+   && echo "$mn_out" | grep -q "\[8\] USBPD" \
+   && echo "$mn_out" | grep -q "cls=0x0098" && echo "$mn_out" | grep -q "cls=0x0EFD" \
+   && echo "$mn_out" | grep -q "cls=0x5044"; then
     green "  [PASS] hwmain (类注册表能力卡/黄金校验和/类ID对拍)"
     PASS=$((PASS+1))
 else
@@ -291,9 +293,14 @@ fi
 # hwmain .mo → kbc 端到端: hw_main()内置 → OP_HW_MAIN_CALL → hw_main_cmd
 # 双参 imm 编码: hw_main("probe ", 152) → 拼接 "probe 152" → CORE 探针 0;
 #   (拼接失败则 find 152 落空 → -1 回绕 255, rc=0 即 imm 动态拼接生效铁证)
+# ⚠️ 2026-10-03 sum 期望值由 1605203290 改为 -1518439201, 这不是"跟着现状改数":
+#   登记 USBPD 后黄金 0x5FAD755A → 0xA57E74DF, 新值跨 2^31, (int) 忠实回传为负。
+#   同日查明 cmd 出口曾对 32 位 FNV 掩 0x7FFFFFFF (旧黄金 <2^31 时是静默空操作),
+#   掩码一旦生效两出口就给出不同值 —— 与 hw_dmc.c:1150 记录的"曾踩"同型, 已修。
+#   断言负数恰恰让本项具备判别力: 谁再塞回掩码, 629044447 ≠ -1518439201 即报红。
 mnm_out=$("$BIN" mo2kbc examples/hwmain_test.mo 2>&1)
-if echo "$mnm_out" | grep -q "count rc=8" && echo "$mnm_out" | grep -q "ok    rc=1" \
-   && echo "$mnm_out" | grep -q "sum   rc=1605203290" && echo "$mnm_out" | grep -q "mode  rc=0" \
+if echo "$mnm_out" | grep -q "count rc=9" && echo "$mnm_out" | grep -q "ok    rc=1" \
+   && echo "$mnm_out" | grep -q "sum   rc=-1518439201" && echo "$mnm_out" | grep -q "mode  rc=0" \
    && echo "$mnm_out" | grep -q "idx3  rc=495" && echo "$mnm_out" | grep -q "find  rc=1" \
    && echo "$mnm_out" | grep -q "probe rc=0" && echo "$mnm_out" | grep -q "idx6v rc=4093"; then
     green "  [PASS] hwmain .mo→kbc (hw_main()内置+双参imm动态拼接 六层全链路)"
@@ -814,6 +821,58 @@ else
         red "  [FAIL] wdbg matrix (rc=$wdmx_rc)"
         echo "$wdmx_out" | sed 's/^/    /'
         FAIL=$((FAIL+1)); FAILED_NAMES+=("wdbg matrix")
+    fi
+fi
+
+# hw_main 全跨矩阵 (2026-10-03 接入)
+#   为什么必须有: 与 dmc/wdbg 同源, 但多一个此前没人碰过的维度 ——
+#   前面两者的 g_bsp 都是【指针】, hw_main 的 g_bsp 是【结构体 + g_bsp_set】,
+#   且带 hw_fault.hw_set/fw_set, 属数据结构改动 = C 形态/交叉编译的风险区。
+#   同样不能是孤儿脚本: 上面 dmc 那条注释已记过"全库无调用"的坑, 不重复犯。
+#   注意 macOS 弱语义: 桩必须带 weak_import, 否则 C++ 侧与 C 侧不共用同一符号。
+if [ "${XIAOMO_SKIP_MATRIX:-0}" = "1" ]; then
+    echo "  [SKIP] hwmain matrix (XIAOMO_SKIP_MATRIX=1)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+    echo "  [SKIP] hwmain matrix (缺 cc/c++)"
+else
+    hnmx_out=$(bash tools/hwmain_matrix.sh 2>&1); hnmx_rc=$?
+    if [ $hnmx_rc -eq 0 ]; then
+        green "  [PASS] hwmain matrix (全跨 16 项: C11==C++17/六模式 override 零告警/双交叉 freestanding/9 探针/双向对拍)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] hwmain matrix (rc=$hnmx_rc)"
+        echo "$hnmx_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("hwmain matrix")
+    fi
+fi
+
+# hw_main 判定器变异 (2026-10-03 接入) —— 验证【裁判】而非【产品】
+#   这一条与上面所有测试都不同: 其余验的是"代码对不对", 这一条验的是
+#   "我们的检查是不是真的在检查"。全绿的测试不证明测试有效。
+#   5 条变异: MV1 桩吐错值 / MV2 摘 extern "C" / MV3 共用代码差异(应存活) /
+#             MV4 形态专属差异 / MV5 摘掉汇总累加。
+#   ⚠️ 代价高: 实测 87s (要连跑 7 遍全矩阵, 单遍矩阵 16s), 故默认关闭,
+#      用 XIAOMO_SKIP_VARIANT=0 显式打开。默认回归因此从 33s -> 49s (多挂 matrix),
+#      打开变异则再涨到约 136s。
+#   为什么默认关闭而不是默认打开: 有人每天跑 make test, 每天 +87s 会变成每天都付的税,
+#      而一旦大家习惯性地跳过它, 它就退化成孤儿脚本 —— 与默认打开无异。
+#   为什么仍然要挂在网里: 孤儿脚本 = 靠人记得, 而"人记得"已经失败过三次。
+#      挂进网 + 默认跳过, 至少让人【看得见它存在且知道怎么开】。
+#   纪律: 判据有两条命 —— 验产品的那条(上面)和验裁判的这条(这里)。
+if [ "${XIAOMO_SKIP_VARIANT:-1}" = "1" ]; then
+    echo "  [SKIP] hwmain variant (变异验裁判; 开: XIAOMO_SKIP_VARIANT=0)"
+elif ! command -v cc >/dev/null 2>&1 || ! command -v c++ >/dev/null 2>&1; then
+    echo "  [SKIP] hwmain variant (缺 cc/c++)"
+else
+    echo "  ... hw_main 判定器变异 (5 条, 耗时较长, 耐心等)"
+    hnvar_out=$(bash tools/hwmain_matrix_mutate.sh 2>&1); hnvar_rc=$?
+    if [ $hnvar_rc -eq 0 ]; then
+        green "  [PASS] hwmain variant (5 条变异全部符合预期: 4 杀 1 存活, 裁判确实在检查)"
+        PASS=$((PASS+1))
+    else
+        red "  [FAIL] hwmain variant (rc=$hnvar_rc) —— 判据本身失效, 上面所有绿灯都不作数"
+        echo "$hnvar_out" | sed 's/^/    /'
+        FAIL=$((FAIL+1)); FAILED_NAMES+=("hwmain variant")
     fi
 fi
 

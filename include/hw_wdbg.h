@@ -166,6 +166,23 @@ int         hw_wdbg_cmd(const char* cmd, void* ctx);
 
 /* 自检 (putf=NULL 静默) → 失败项数 (0 = 全过) */
 int         hw_wdbg_selftest(int (*putf)(const char*));
+/* 🕳️🕳️ 下面 4 个声明曾只存在于 src/hw/hw_wdbg.h 这份【未追踪的同名副本】里。
+ *    而 `#include "hw_wdbg.h"` 对引号包含会【优先搜当前文件所在目录】, 于是:
+ *      - src/hw/hw_wdbg.c  -> 拿到 src/hw/ 那份 (183行, 有这 4 个声明)
+ *      - vm_core.c / main.c -> 走 -Iinclude 拿到本份 (175行, 原本【没有】)
+ *    两套声明 = 实现 TU 与消费 TU 看到不同的接口。更糟: 干净克隆里 src/hw/ 那份
+ *    不存在, 全部 TU 改拿本份 —— 本地与克隆编译的不是同一套声明, 而两边都"全绿"。
+ *    这就是仓库记过的"本地全绿靠磁盘陈旧兜住"的变种。
+ *    修法: 本份为唯一权威, 补齐 4 个声明。两份的符号集合已核验等价(双向差集为空),
+ *    因此【删除 src/hw/ 那份影子副本不会改变任何编译单元看到的接口】。
+ *    纪律: 同一头文件存在两份副本时, 必须先问"哪份是权威"再谈其它 ——
+ *          副本之间最隐蔽的病不是内容不同, 而是【各自服务不同的编译单元】。 */
+uint32_t    hw_wdbg_selftest_failline(uint32_t i);
+uint32_t    hw_wdbg_selftest_failcount(void);
+/* [18] 悬垂契约的 A/B 实测: 1=真拷了副本 0=只存了指针
+ * [18b] 夹具有判别力的证明: 1=有缺陷实现确实被抓到 (否则 [18] 的 1 不可信) */
+int         hw_wdbg_dangle_pos(void);
+int         hw_wdbg_dangle_neg(void);
 /* CLI: ./xiaomo wdbg [...] */
 int         hw_wdbg_cli(int argc, char** argv);
 

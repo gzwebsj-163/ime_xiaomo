@@ -4,9 +4,12 @@
 #   编译+运行: ./xiaomo mo2kbc examples/hwmain_test.mo
 #   或两步:    ./xiaomo mo2kbc -o examples/hwmain_test.kbc examples/hwmain_test.mo
 #              ./xiaomo kvm examples/hwmain_test.kbc
-# 返回码: count=8 / ok=1 / sum=1604573786 (0x5FAD755A 黄金) /
+# 返回码: count=9 / ok=1 / sum=-1518439201 (黄金 0xA57E74DF, ≥2^31 故 (int) 为负) /
 #         mode=0 (HOST) / idx N=类ID / find ID=表序 /
 #         probe ID=0 (健康) / 255=未识别 (uint8 回绕)
+# ⚠️ 2026-10-03 登记 USBPD: 黄金 0x5FAD755A → 0xA57E74DF (独立 Python 复算),
+#    count 8 → 9。本行旧注释写的 sum=1604573786 与测试期望 1605203290 从来就对不上
+#    (0x5FAD755A 的真值是 1605203290), 属长期没人核的注释漂移, 一并更正。
 # 类 ID (用户定版): ASR=0x58 CORE=0x98 DEV=0x89 DIRECT=0x1EF
 #                   FAULT=0x7DE HEX=0xDEF OEM=0xFFD TOKEN=0xEFD
 # 链路: .mo hw_main() → mo2kbc OP_HW_MAIN_CALL → kvm_run → hw_main_cmd()
