@@ -720,6 +720,26 @@ else
     FAIL=$((FAIL+1)); FAILED_NAMES+=("dmc selftest")
 fi
 
+# ---- hw_dmc_crw CRW/CPT 分区表层 (归档之外的重写实现, 2026-10-03) ----
+# 语义来源: src/hw/hw_dmc_base.c 归档的伪代码底稿 base_pseudo.c:15-52
+# 归档本体一个字未动 (由 tools/dmc_verbatim_check.py 逐字节校验), 本模块是【新文件】。
+# 原码 8 类硬伤: **std** 裸解引用 / 移位量 2193·57073 越界(x86 上双双退化成 >>17)
+#   / cpt_t 成员重名 / void 参与 | 聚合 / 实参对不上 / 哨兵写成 = / dmc_while 无超时。
+# 变异矩阵在 tools/crw_matrix.py: 改【模块源码副本】, 6 条变异必须全被杀。
+crw_mat=$(python3 tools/crw_matrix.py 2>&1); crw_mat_rc=$?
+crw_an=$(printf '%s' "$crw_mat" | sed -n 's/^\[baseline\] 断言数: \([0-9]*\).*/\1/p' | head -1)
+crw_kn=$(printf '%s' "$crw_mat" | sed -n 's/^变异矩阵: 杀掉 \([0-9]*\) \/ \([0-9]*\).*/\1 \/ \2/p' | head -1)
+crw_ks=$(printf '%s' "$crw_mat" | sed -n 's/^变异矩阵: 杀掉 \([0-9]*\) \/ \([0-9]*\)/\1/p' | head -1)
+crw_kt=$(printf '%s' "$crw_mat" | sed -n 's/^变异矩阵: 杀掉 \([0-9]*\) \/ \([0-9]*\)/\2/p' | head -1)
+if [ $crw_mat_rc -eq 0 ]; then
+    green "  [PASS] crw selftest + 变异矩阵 (${crw_an:-?} 断言 / 变异 ${crw_ks:-?}/${crw_kt:-?} 全杀 / 归档 md5 未动)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] crw selftest + 变异矩阵 (rc=$crw_mat_rc 变异 ${crw_ks:-?}/${crw_kt:-?})"
+    echo "$crw_mat" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("crw matrix")
+fi
+
 # 能力卡: 命令表 / 状态表 / 黄金 / 帧布局 / CRC 标准向量 / HELLO 打包往返
 dmcc_out=$("$BIN" dmc cmds 2>&1); dmcs_out=$("$BIN" dmc states 2>&1)
 dmcg_out=$("$BIN" dmc golden 2>&1); dmcf_out=$("$BIN" dmc frame 2>&1)

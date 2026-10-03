@@ -6,7 +6,7 @@ CFLAGS = -Wall -std=c++17 -g -Iinclude -Iusbpd/include -D_POSIX_C_SOURCE=200809L
 CXXFLAGS = $(CFLAGS)
 
 C_SRCS = src/lexer.c src/parser.c src/ast.c src/vm.c src/vm_core.c src/vm_stack.c src/mo2kbc.c src/tensor.c src/nd_tensor.c src/weights.c src/debug_tool.c src/main.c
-HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c src/hw/hw_oem.c src/hw/hw_hex.c src/hw/hw_dev.c src/hw/hw_token.c src/hw/hw_fault.c src/hw/hw_core.c src/hw/hw_main.c src/hw/hw_wdbg.c src/hw/hw_flash.c src/hw/hw_pin.c src/hw/hw_dc.c src/hw/hw_dmc.c src/hw/hw_dmc_base.c usbpd/src/hw_usbpd.c usbpd/src/hw_usbpd_selftest.c
+HW_SRCS = src/hw/hw_direct.c src/hw/hw_demo.c src/hw/hw_oem.c src/hw/hw_hex.c src/hw/hw_dev.c src/hw/hw_token.c src/hw/hw_fault.c src/hw/hw_core.c src/hw/hw_main.c src/hw/hw_wdbg.c src/hw/hw_flash.c src/hw/hw_pin.c src/hw/hw_dc.c src/hw/hw_dmc.c src/hw/hw_dmc_base.c src/hw/hw_dmc_crw.c usbpd/src/hw_usbpd.c usbpd/src/hw_usbpd_selftest.c
 CPP_SRCS =
 
 C_OBJS = $(C_SRCS:.c=.o)
