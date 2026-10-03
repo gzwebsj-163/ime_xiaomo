@@ -1,4 +1,3 @@
-  from cryptography.hazmat.backends import default_backend
 # -*- coding: utf-8 -*-
 """
 esp32_handlers.py — 把 esp32_bridge 挂载到 web.py 路由

@@ -1214,4 +1214,3 @@ def _source_available(func: Callable) -> bool:
         return True
     except (OSError, TypeError):
         return False
-  from cryptography.hazmat.backends import default_backend
