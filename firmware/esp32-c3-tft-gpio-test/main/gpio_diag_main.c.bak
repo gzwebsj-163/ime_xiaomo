@@ -1,0 +1,97 @@
+/**
+ * ESP32-C3 GPIO 接线检测固件（一次性诊断用）
+ *
+ * 引脚定义（与 esp32-c3-tft-lvgl-va 工程一致）：
+ *   BL=GPIO0  DC=GPIO4  RST=GPIO5  SCLK=GPIO6  MOSI=GPIO7  CS=GPIO10
+ *
+ * 烧录后打开串口（115200），配合万用表逐根线排查：
+ *   STEP1 BL  1Hz 方波 x4 → 屏幕背光应一亮一灭闪烁
+ *   STEP2 RST 复位脉冲    → 屏幕应闪一下
+ *   STEP3 CS  1Hz 方波 x4 → 万用表量 0↔3.3V 跳变
+ *   STEP4 DC  1Hz 方波 x4 → 万用表量 0↔3.3V 跳变
+ *   STEP5 SCLK 1Hz 方波 x4 → 万用表量 0↔3.3V 跳变
+ *   STEP6 MOSI 1Hz 方波 x4 → 万用表量 0↔3.3V 跳变
+ *   STEP7 恢复常态（BL=1, RST=1, 其余=0）→ 空闲
+ */
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+
+static const char *TAG = "gpio_test";
+
+#define PIN_BL   0
+#define PIN_DC   4
+#define PIN_RST  5
+#define PIN_SCLK 6
+#define PIN_MOSI 7
+#define PIN_CS   10
+
+static void set_out(int pin, int level)
+{
+    gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(pin, level);
+}
+
+static void blink_n_times(int pin, int n, int ms)
+{
+    for (int i = 0; i < n; i++) {
+        gpio_set_level(pin, 1);
+        ESP_LOGI(TAG, "GPIO%d = HIGH", pin);
+        vTaskDelay(pdMS_TO_TICKS(ms));
+        gpio_set_level(pin, 0);
+        ESP_LOGI(TAG, "GPIO%d = LOW", pin);
+        vTaskDelay(pdMS_TO_TICKS(ms));
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "=== ESP32-C3 GPIO wiring test for ST7789 ===");
+    ESP_LOGI(TAG, "pins: BL=%d DC=%d RST=%d SCLK=%d MOSI=%d CS=%d",
+             PIN_BL, PIN_DC, PIN_RST, PIN_SCLK, PIN_MOSI, PIN_CS);
+
+    /* STEP 1: 背光 1Hz 方波，共 4 次（8 秒）→ 观察屏幕背光闪烁 */
+    ESP_LOGI(TAG, "[STEP1] BL backlight blink x4 (watch screen glow)");
+    set_out(PIN_BL, 1);
+    blink_n_times(PIN_BL, 4, 1000);
+
+    /* STEP 2: RST 复位脉冲 → 屏幕应闪一下 */
+    ESP_LOGI(TAG, "[STEP2] RST reset pulse (screen should flicker)");
+    set_out(PIN_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    set_out(PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    /* STEP 3-6: 各信号线 1Hz 方波（各 4 次）→ 万用表量 0~3.3V 跳变 */
+    set_out(PIN_CS, 0);
+    ESP_LOGI(TAG, "[STEP3] CS(GPIO10) square wave x4");
+    blink_n_times(PIN_CS, 4, 1000);
+
+    set_out(PIN_DC, 0);
+    ESP_LOGI(TAG, "[STEP4] DC(GPIO4) square wave x4");
+    blink_n_times(PIN_DC, 4, 1000);
+
+    set_out(PIN_SCLK, 0);
+    ESP_LOGI(TAG, "[STEP5] SCLK(GPIO6) square wave x4");
+    blink_n_times(PIN_SCLK, 4, 1000);
+
+    set_out(PIN_MOSI, 0);
+    ESP_LOGI(TAG, "[STEP6] MOSI(GPIO7) square wave x4");
+    blink_n_times(PIN_MOSI, 4, 1000);
+
+    /* STEP 7: 恢复常态 */
+    ESP_LOGI(TAG, "[STEP7] done. BL=on, RST=high, others=low (idle)");
+    set_out(PIN_BL, 1);
+    set_out(PIN_RST, 1);
+    set_out(PIN_CS, 0);
+    set_out(PIN_DC, 0);
+    set_out(PIN_SCLK, 0);
+    set_out(PIN_MOSI, 0);
+
+    ESP_LOGI(TAG, "=== test finished, looping idle ===");
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}

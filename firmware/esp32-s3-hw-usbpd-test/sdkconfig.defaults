@@ -1,0 +1,31 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# ⚠️⚠️ 关键: 本板 flash 真实容量是 16MB, 不是 IDF 默认的 2MB。
+#   若沿用默认 2MB 去刷:
+#     - esptool 会按 2MB 布局解释镜像, 回读长度与镜像不等 => 比对全假差异
+#     - 更糟: 部分 esptool 版本会用 2MB 布局去改写 flash 头部的 size 字段,
+#       影响后续启动
+#   真相来源 = 产品固件 build_v3/flash_args (本机活体), 不是 IDF 猜测值。
+#   依据: 板卡 = ESP32-S3 QFN56 rev0.2 / 16MB flash / 8MB PSRAM。
+#
+# 🕳️ 真正让它生效的根因不是 choice 互斥, 是【sdkconfig 会被粘住】:
+#   1) ESPTOOLPY_FLASHSIZE_* 是 choice 组, 同组互斥 => 必须显式 =n 掉 2MB。
+#   2) 但更根本: sdkconfig 一旦存在, IDF 把它当【已定稿配置】读,
+#      【sdkconfig.defaults 只在 sdkconfig 不存在时生效】。
+#      `rm -rf build` 不会删 sdkconfig => 改了 defaults 重配, 值纹丝不动。
+#      验证方式: stat -f "%Sm" sdkconfig 比 defaults 的 mtime, 前者不动就说明没重生成。
+#   => 改完 defaults 的必做动作: rm -f sdkconfig && idf.py reconfigure
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=n
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# 🕳️ 不要开 HEADER_FLASHSIZE_UPDATE (我一度开了, 后撤):
+#   Kconfig 原文: "Enabling this option turns off the image protection
+#   against corruption by a SHA256 digest. Updating the bootloader image
+#   before flashing would invalidate the digest."
+#   即它会【牺牲 bootloader 的 SHA256 完整性保护】, 而它只影响 bootloader,
+#   与本工程真正要修的 flash_size 布局【无关】—— 是我顺手加的过度设计。
+#   代价明确大于收益, 撤掉。开了会让 flash_args 变成 --flash_size detect,
+#   回读长度随探测结果变化, 反而给 md5 对拍引入额外不确定性。
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n

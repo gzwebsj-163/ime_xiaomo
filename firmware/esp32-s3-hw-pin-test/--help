@@ -1,0 +1,191 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3810,len:0x178c
+load:0x403c9700,len:0x4
+load:0x403c9704,len:0xcbc
+load:0x403cc700,len:0x2d98
+entry 0x403c9914
+[0;32mI (27) boot: ESP-IDF v5.2 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time Oct  2 2026 15:48:04[0m
+[0;32mI (27) boot: Multicore bootloader[0m
+[0;32mI (30) boot: chip revision: v0.2[0m
+[0;32mI (34) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (38) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (43) boot.esp32s3: SPI Flash Size : 16MB[0m
+[0;32mI (48) boot: Enabling RNG early entropy source...[0m
+[0;32mI (53) boot: Partition Table:[0m
+[0;32mI (57) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (64) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (72) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (79) boot:  2 factory          factory app      00 00 00010000 00400000[0m
+[0;32mI (86) boot:  3 storage          Unknown data     01 82 00410000 00bf0000[0m
+[0;32mI (94) boot: End of partition table[0m
+[0;32mI (98) esp_image: segment 0: paddr=00010020 vaddr=3c0e0020 size=9bb28h (637736) map[0m
+[0;32mI (221) esp_image: segment 1: paddr=000abb50 vaddr=3fc9c400 size=044c8h ( 17608) load[0m
+[0;32mI (225) esp_image: segment 2: paddr=000b0020 vaddr=42000020 size=da600h (894464) map[0m
+[0;32mI (387) esp_image: segment 3: paddr=0018a628 vaddr=3fca08c8 size=00678h (  1656) load[0m
+[0;32mI (388) esp_image: segment 4: paddr=0018aca8 vaddr=40374000 size=1830ch ( 99084) load[0m
+[0;32mI (424) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (425) boot: Disabling RNG early entropy source...[0m
+[0;32mI (436) cpu_start: Multicore app[0m
+[0;32mI (437) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (437) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (440) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (445) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (450) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (456) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (461) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (466) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (472) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (478) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (484) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (490) MSPI Timing: PSRAM timing tuning index: 5[0m
+[0;32mI (494) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (499) esp_psram: Speed: 80MHz[0m
+[0;32mI (955) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (964) cpu_start: Pro cpu start user code[0m
+[0;32mI (965) cpu_start: cpu freq: 240000000 Hz[0m
+[0;32mI (965) cpu_start: Application information:[0m
+[0;32mI (968) cpu_start: Project name:     esp32-s3-lvgl-ui[0m
+[0;32mI (973) cpu_start: App version:      1[0m
+[0;32mI (978) cpu_start: Compile time:     Oct  2 2026 15:47:33[0m
+[0;32mI (984) cpu_start: ELF file SHA256:  b4ad7c4b0...[0m
+[0;32mI (989) cpu_start: ESP-IDF:          v5.2[0m
+[0;32mI (994) cpu_start: Min chip rev:     v0.0[0m
+[0;32mI (999) cpu_start: Max chip rev:     v0.99 [0m
+[0;32mI (1003) cpu_start: Chip rev:         v0.2[0m
+[0;32mI (1008) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (1016) heap_init: At 3FCAA498 len 0003F278 (252 KiB): RAM[0m
+[0;32mI (1022) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (1028) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (1034) heap_init: At 600FE010 len 00001FD8 (7 KiB): RTCRAM[0m
+[0;32mI (1041) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (1049) spi_flash: detected chip: boya[0m
+[0;32mI (1053) spi_flash: flash io: dio[0m
+[0;32mI (1057) sleep: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (1064) sleep: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (1071) main_task: Started on CPU0[0m
+[0;32mI (1075) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations[0m
+[0;32mI (1084) main_task: Calling app_main()[0m
+[0;32mI (1088) app: === AI 远程调试器 UI (LVGL) 启动 ===[0m
+[0;32mI (1109) ui_cfg: 载入配置 ver=1 lang=0 sntp=0 epoch=1609545615[0m
+[0;32mI (1109) app: 配置: 已载入 lang=0(中文) sntp=0 时间=已设定[0m
+[0;32mI (1113) gpio: GPIO[4]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (1121) gpio: GPIO[5]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0 [0m
+[0;32mI (1151) lcd_hw: vendor init: 13 条已下发（PORCTRL/gamma/INVON 等）[0m
+[0;32mI (1255) lcd_hw: LCD 就绪: 320x240 横屏, SPI 20 MHz, MADCTL 0x60[0m
+[prog] backend ready; hw_pin mode=ESP32 golden=0x9E0F10FA
+prog_hw: profile=s3-spi drv=BB real=0 spi_mode=0 uart=115200
+prog_hw: MOSI=IO11 MISO=IO13 CK=IO12 CS=IO14 TX=IO8 RX=IO9 RST=IO18 GND=GND
+[prog] cfg s3-spi/SIM
+[0;32mI (1666) gpio: GPIO[17]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (1666) gpio: GPIO[38]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (1674) gpio: GPIO[39]| InputEn: 1| OutputEn: 0| OpenDrain: 0| Pullup: 1| Pulldown: 0| Intr:0 [0m
+[0;32mI (1683) btn: UP -> GPIO38  初始电平=0[0m
+[0;32mI (1688) btn: DOWN -> GPIO39  初始电平=0[0m
+[0;32mI (1693) btn: BACK -> GPIO17  初始电平=0[0m
+[0;32mI (1698) btn: 3 键就绪：GPIO38/39/17 | 去抖 按下30ms/抬起300ms | 长按 1200ms | 真松开 500ms[0m
+[0;32mI (1708) ui: UI v3 就绪：9 页（开机/向导/菜单/探针/烧录/引脚/状态/设置/关于）[0m
+[0;32mI (1719) wifi: NVS 命中凭据 → SSID [FYX_E809_2.4g][0m
+[0;32mI (1726) pp: pp rom version: e7ae62f[0m
+[0;32mI (1729) net80211: net80211 rom version: e7ae62f[0m
+I (1735) wifi:wifi driver task: 3fcd9718, prio:23, stack:6656, core=0
+I (1743) wifi:wifi firmware version: cc1dd81
+I (1744) wifi:wifi certification version: v7.0
+I (1748) wifi:config NVS flash: enabled
+I (1752) wifi:config nano formating: disabled
+I (1756) wifi:Init data frame dynamic rx buffer num: 32
+I (1761) wifi:Init static rx mgmt buffer num: 5
+I (1765) wifi:Init management short buffer num: 32
+I (1770) wifi:Init static tx buffer num: 16
+I (1774) wifi:Init tx cache buffer num: 32
+I (1777) wifi:Init static tx FG buffer num: 2
+I (1781) wifi:Init static rx buffer size: 1600
+I (1786) wifi:Init static rx buffer num: 10
+I (1789) wifi:Init dynamic rx buffer num: 32
+[0;32mI (1794) wifi_init: rx ba win: 6[0m
+[0;32mI (1797) wifi_init: tcpip mbox: 32[0m
+[0;32mI (1801) wifi_init: udp mbox: 6[0m
+[0;32mI (1805) wifi_init: tcp mbox: 6[0m
+[0;32mI (1809) wifi_init: tcp tx win: 5760[0m
+[0;32mI (1813) wifi_init: tcp rx win: 5760[0m
+[0;32mI (1817) wifi_init: tcp mss: 1440[0m
+[0;32mI (1821) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (1826) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (1832) phy_init: phy_version 620,ec7ec30,Sep  5 2023,13:49:13[0m
+I (1881) wifi:mode : sta (1c:db:d4:46:29:bc)
+I (1882) wifi:enable tsf
+I (1883) wifi:Set ps type: 0, coexist: 0
+
+[0;32mI (1884) wifi: ==== 启动扫描诊断 ====[0m
+[0;32mI (1886) wifi: STA 驱动就绪，交由 mgr 任务扫描+连接[0m
+[0;32mI (1892) lcd_hw: LVGL 刷新任务已启动（UI 构建完成之后）[0m
+[0;32mI (1900) app: UI 就绪：v3 九页（开机 / 向导 / 菜单 / 探针 / 烧录 / 引脚 / 状态 / 设置 / 关于）[0m
+[0;32mI (1911) main_task: Returned from app_main()[0m
+[0;32mI (4387) wifi: ✓ 定向扫描命中 [FYX_E809_2.4g] RSSI -30 dBm CH 1 auth 4[0m
+[0;32mI (6889) wifi: 全量扫描：2.4GHz 可见 48 个 AP（列出前 48）[0m
+[0;32mI (6890) wifi:   [ 1] ChinaNet-cwEt                 -34 dBm  CH 6  auth4[0m
+[0;32mI (6893) wifi:   [ 2] FYX_E809_2.4g                 -42 dBm  CH 1  auth4[0m
+[0;32mI (6901) wifi:   [ 3] Tommy                         -54 dBm  CH 2  auth3[0m
+[0;32mI (6908) wifi:   [ 4]                               -56 dBm  CH 2  auth0[0m
+[0;32mI (6915) wifi:   [ 5]                               -56 dBm  CH 2  auth3[0m
+[0;32mI (6923) wifi:   [ 6] Bruce                         -62 dBm  CH 6  auth3[0m
+[0;32mI (6930) wifi:   [ 7]                               -62 dBm  CH 6  auth3[0m
+[0;32mI (6938) wifi:   [ 8]                               -72 dBm  CH 1  auth4[0m
+[0;32mI (6945) wifi:   [ 9] 666                           -73 dBm  CH 1  auth4[0m
+[0;32mI (6952) wifi:   [10] Tenda_7137A0                  -75 dBm  CH 4  auth3[0m
+[0;32mI (6960) wifi:   [11]                               -83 dBm  CH 2  auth0[0m
+[0;32mI (6967) wifi:   [12]                               -83 dBm  CH 2  auth3[0m
+[0;32mI (6975) wifi:   [13] Tommy                         -84 dBm  CH 2  auth3[0m
+[0;32mI (6982) wifi:   [14] 666                           -87 dBm  CH 1  auth4[0m
+[0;32mI (6989) wifi:   [15] Wilink_ch                     -87 dBm  CH11  auth4[0m
+[0;32mI (6997) wifi:   [16] ChinaNet-nxqD5G               -87 dBm  CH13  auth3[0m
+[0;32mI (7004) wifi:   [17] 701                           -88 dBm  CH 6  auth3[0m
+[0;32mI (7011) wifi:   [18]                               -88 dBm  CH 6  auth0[0m
+[0;32mI (7019) wifi:   [19] B-LINK-2.4G_ED4042            -88 dBm  CH 9  auth4[0m
+[0;32mI (7026) wifi:   [20]                               -89 dBm  CH 9  auth4[0m
+[0;32mI (7034) wifi:   [21] way                           -89 dBm  CH11  auth3[0m
+[0;32mI (7041) wifi:   [22] 矮肥                        -90 dBm  CH 1  auth4[0m
+[0;32mI (7048) wifi:   [23]                               -91 dBm  CH 6  auth0[0m
+[0;32mI (7056) wifi:   [24] ChinaNet-tkmd                 -91 dBm  CH 6  auth4[0m
+[0;32mI (7063) wifi:   [25] 360WiFi-704                   -91 dBm  CH13  auth4[0m
+[0;32mI (7070) wifi:   [26] 402G                          -92 dBm  CH 6  auth3[0m
+[0;32mI (7078) wifi:   [27] TP-LINK_37B6                  -92 dBm  CH 6  auth4[0m
+[0;32mI (7085) wifi:   [28] USER_9B39D0                   -93 dBm  CH 2  auth4[0m
+[0;32mI (7093) wifi:   [29] USER_201                      -93 dBm  CH 9  auth4[0m
+[0;32mI (7100) wifi:   [30] miss8                         -93 dBm  CH10  auth4[0m
+[0;32mI (7107) wifi:   [31] ASUS_60                       -93 dBm  CH11  auth3[0m
+[0;32mI (7115) wifi:   [32]                               -94 dBm  CH 6  auth4[0m
+[0;32mI (7122) wifi:   [33] MARY_Guest                    -94 dBm  CH11  auth3[0m
+[0;32mI (7129) wifi:   [34] USER_9BFB3E                   -94 dBm  CH11  auth4[0m
+[0;32mI (7137) wifi:   [35] 34023443                      -94 dBm  CH13  auth4[0m
+[0;32mI (7144) wifi:   [36] kelly_lin                     -95 dBm  CH 8  auth4[0m
+[0;32mI (7152) wifi:   [37] 84066423                      -95 dBm  CH10  auth4[0m
+[0;32mI (7159) wifi:   [38]                               -95 dBm  CH11  auth3[0m
+[0;32mI (7166) wifi:   [39] ChinaNet-QJh6                 -95 dBm  CH11  auth4[0m
+[0;32mI (7174) wifi:   [40] Yy                            -95 dBm  CH11  auth4[0m
+[0;32mI (7181) wifi:   [41] USER_9B25E1                   -96 dBm  CH 1  auth4[0m
+[0;32mI (7188) wifi:   [42] CMCC-EYyG                     -96 dBm  CH 8  auth4[0m
+[0;32mI (7196) wifi:   [43]                               -96 dBm  CH10  auth4[0m
+[0;32mI (7203) wifi:   [44] USER_1BF612                   -96 dBm  CH10  auth4[0m
+[0;32mI (7211) wifi:   [45] MARY                          -96 dBm  CH11  auth0[0m
+[0;32mI (7218) wifi:   [46] CU-1399                       -97 dBm  CH10  auth4[0m
+[0;32mI (7225) wifi:   [47] CMCC-FEAJ                     -97 dBm  CH11  auth7[0m
+[0;32mI (7233) wifi:   [48] 603                           -98 dBm  CH 1  auth4[0m
+[0;32mI (7241) wifi: ==== 扫描结束，开始连接 ====[0m
+I (9655) wifi:new:<1,0>, old:<1,0>, ap:<255,255>, sta:<1,0>, prof:1
+I (10033) wifi:state: init -> auth (b0)
+I (10043) wifi:state: auth -> assoc (0)
+I (10046) wifi:state: assoc -> run (10)
+I (10056) wifi:connected with FYX_E809_2.4g, aid = 3, channel 1, BW20, bssid = ec:6c:9f:ab:e8:0a
+I (10057) wifi:security: WPA2-PSK, phy: bg, rssi: -28
+I (10059) wifi:pm start, type: 0
+
+I (10062) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us
+I (10070) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000
+I (10079) wifi:AP's beacon interval = 102400 us, DTIM period = 1
+[0;32mI (11086) esp_netif_handlers: sta ip: 192.168.0.169, mask: 255.255.255.0, gw: 192.168.0.1[0m
+[0;32mI (11087) wifi: ✔ 已连接 SSID [FYX_E809_2.4g]  IP 192.168.0.169  RSSI -42 dBm  CH 1[0m

@@ -1,0 +1,5 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 本测试不用 TLS: 关掉证书包 (本机 IDF python 环境 cffi/cryptography 架构不匹配,
+# gen_crt_bundle.py 必然失败; 关掉即跳过该构建步骤)
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n

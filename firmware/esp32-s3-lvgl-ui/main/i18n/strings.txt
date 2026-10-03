@@ -1,0 +1,231 @@
+# ═══════════════════════════════════════════════════════════════
+# i18n 文案唯一真源（Single Source of Truth）
+# ═══════════════════════════════════════════════════════════════
+# 格式：  key|中文|English
+#   · 本文件是 UI 文案的**唯一**真源
+#   · tools/gen_i18n.py  → 生成 main/i18n.c（C 字符串表）
+#   · tools/gen_font.py  → 提取字符集 → 生成中文字体子集
+#   ⚠️ 加文案只改这里，然后重跑两个脚本。绝不手改 i18n.c 或字体。
+#   ⚠️ 字体子集由本表导出：表里没有的字**上屏会是方块**，所以改完必须重跑 gen_font.py
+#
+# key 命名： S_ 前缀 = 通用字符串,  M_ = 主菜单,  W_ = 向导,  P_ = 功能页
+# ═══════════════════════════════════════════════════════════════
+
+# ─────────────── 通用 ───────────────
+S_OK|确定|OK
+S_CANCEL|取消|Cancel
+S_BACK|返回|Back
+S_SAVE|保存|Save
+S_SAVED|已保存|Saved
+S_YES|是|Yes
+S_NO|否|No
+S_ON|开|On
+S_OFF|关|Off
+S_NONE|无|None
+S_AUTO|自动|Auto
+S_MANUAL|手动|Manual
+S_DEFAULT|默认|Default
+S_ERROR|错误|Error
+S_FAIL|失败|Fail
+S_PASS|通过|Pass
+S_READY|就绪|Ready
+S_BUSY|处理中|Busy
+S_WAIT|等待|Wait
+S_UNKNOWN|未知|Unknown
+S_NONE_DETECTED|未检出|Not Detected
+S_ARE_YOU_SURE|确认操作|Are You Sure
+S_CONFIRM|确认|Confirm
+S_LOADING|加载中|Loading
+S_VERSION|版本|Version
+S_TOTAL|合计|Total
+
+# ─────────────── 开机 / 品牌 ───────────────
+W_BRAND|远程调试器|Remote Debugger
+W_BOOTING|正在启动|Booting
+W_SKIP|长按返回跳过|Hold Back to Skip
+
+# ─────────────── 首次向导 ───────────────
+W_SETUP_FIRST|首次使用设置|First-Time Setup
+W_SETUP_AGAIN|重新设置向导|Run Setup Again
+W_STEP_LANG|第 1 步 语言|Step 1 of 3 Language
+W_STEP_TIME|第 2 步 时间|Step 2 of 3 Date & Time
+W_STEP_DONE|第 3 步 完成|Step 3 of 3 Finish
+W_LANG_TITLE|选择语言|Select Language
+W_LANG_ZH|中文|Chinese
+W_LANG_EN|English|English
+W_TIME_TITLE|设置时间|Set Date & Time
+W_TIME_YEAR|年|Year
+W_TIME_MONTH|月|Month
+W_TIME_DAY|日|Day
+W_TIME_HOUR|时|Hour
+W_TIME_MIN|分|Minute
+W_TIME_SEC|秒|Second
+W_TIME_UP|长按上键调整|Hold Up to Adjust
+W_TIME_DOWN|长按下键调整|Hold Down to Adjust
+W_TIME_NEXT|长按上键继续|Hold Up for Next
+W_TIME_SAVED|时间已保存|Time Saved
+W_SETUP_DONE|设置完成|Setup Complete
+W_ENTER_MENU|进入主菜单|Entering Menu
+
+# ─────────────── 主菜单 9 格 ───────────────
+M_PROBE|探针检测|Probe Detect
+M_FLASH|烧录器|Flasher
+M_DMC|DMC 链路|DMC Link
+M_DC|DC 电源|DC Power
+M_DIRECT|直通控制|Direct Pass
+M_FAULT|故障诊断|Fault Diag
+M_SETUP|系统设置|System Setup
+M_STATUS|状态信息|Status
+M_ABOUT|关于|About
+
+# ─────────────── 探针检测 ───────────────
+P_PROBE_TITLE|探针检测|Probe Detection
+P_PROBE_PROFILE|档案|Profile
+P_PROBE_DRIVER|驱动|Driver
+P_PROBE_JEDEC|读标识|Read JEDEC
+P_PROBE_START|开始检测|Start Detect
+P_PROBE_VENDOR|厂商|Vendor
+P_PROBE_DEV|器件|Device
+P_PROBE_CAPACITY|容量|Capacity
+P_PROBE_SERIAL|序列号|Serial
+P_PROBE_FOUND|已检出|Detected
+P_PROBE_NO_CHIP|未检出器件|No Device Found
+P_PROBE_TIP_CHECK|检查跳线 供电 档位|Check Jumper Supply Mode
+P_PROBE_TIP_PROBE|检查探针接触|Check Probe Contact
+P_PROBE_SIM|模拟|Simulated
+
+# ─────────────── 烧录器 ───────────────
+P_PROG_TARGET|目标|Target
+P_PROG_DRIVER|驱动|Driver
+P_PROG_IMAGE|镜像|Image
+P_PROG_READ_ID|读标识|Read ID
+P_PROG_ERASE|擦除|Erase
+P_PROG_PROGRAM|写入|Program
+P_PROG_VERIFY|校验|Verify
+P_PROG_ISP|同步|ISP Sync
+P_PROG_CAPACITY|读容量|Read Size
+P_PROG_ERASE_ALL|整片擦除|Chip Erase
+P_PROG_ERASE_WARN|擦除不可恢复|Erase Is Permanent
+P_PROG_WRITE_OK|写入成功|Write OK
+P_PROG_VERIFY_OK|校验一致|Verify OK
+P_PROG_BYTE_OK|逐字节一致|Byte Match
+P_PROG_NOFLASH|未连接芯片|No Flash Present
+P_PROG_LOOP_ERR|回环错误|Loopback Error
+P_PROG_CHECK_WIRE|检查接线与跳线|Check Wiring Jumper
+
+# ─────────────── DMC 链路 ───────────────
+P_DMC_TITLE|DMC 链路|DMC Link
+P_DMC_ADDR|从机地址|Slave Addr
+P_DMC_LEN|载荷长度|Payload Len
+P_DMC_BCAST|广播|Broadcast
+P_DMC_UNICAST|单播|Unicast
+P_DMC_HELLO|握手|Hello
+P_DMC_DATA|数据|Data
+P_DMC_STATUS|状态查询|Status
+P_DMC_RESET|复位|Reset
+P_DMC_CRC|校验自检|CRC Self-Test
+P_DMC_RXERR|接收错误|RX Errors
+P_DMC_TXERR|发送错误|TX Errors
+P_DMC_NOLINK|无链路回应|No Link Response
+P_DMC_LEN_LIMIT|长度超限 上限 249|Length Over Limit 249 Max
+
+# ─────────────── DC 电源 ───────────────
+P_DC_TITLE|DC 电源|DC Power
+P_DC_SIDE|侧别|Polarity
+P_DC_INPUT|输入|Input
+P_DC_OUTPUT|输出|Output
+P_DC_ON|上电|Power On
+P_DC_OFF|断电|Power Off
+P_DC_SET|设定值|Setpoint
+P_DC_WIN|窗口|Window
+P_DC_REF|参考预值|Reference
+P_DC_VOLT|电压|Voltage
+P_DC_CURR|电流|Current
+P_DC_POWR|功率|Power
+P_DC_IN_RANGE|在窗口内|In Window
+P_DC_OUT_RANGE|超窗口|Out Of Window
+P_DC_PROTO|供电协议|Power Protocol
+P_DC_SESSION|会话|Session
+P_DC_SESSION_OPEN|已开会话|Session Open
+P_DC_SESSION_CLOSED|已关会话|Session Closed
+P_DC_ADC_NOBIND|模拟值 非实测|Simulated Not Measured
+
+# ─────────────── 直通控制 ───────────────
+P_DIR_TITLE|直通控制|Direct Pass
+P_DIR_CHAN|通道|Channel
+P_DIR_UART|串口|UART
+P_DIR_I2C|双线总线|I2C
+P_DIR_PWM|脉宽|PWM
+P_DIR_PASSTHRU|透传|Pass-Through
+P_DIR_RATE|速率|Rate
+P_DIR_LOOP|回环校验|Loopback Test
+P_DIR_THROUGHPUT|吞吐|Throughput
+P_DIR_OK|透传正常|Pass-Through OK
+P_DIR_ERR|透传错误|Pass-Through Error
+
+# ─────────────── 故障诊断 ───────────────
+P_FAULT_TITLE|故障诊断|Fault Diagnostics
+P_FAULT_PIN|引脚|Pin
+P_FAULT_STATE|状态|State
+P_FAULT_OK|正常|OK
+P_FAULT_NOLINK|未连接|No Link
+P_FAULT_BAD|异常|Bad
+P_FAULT_SCAN|逐脚扫描|Pin-by-Pin Scan
+P_FAULT_INJECT|注入故障|Inject Fault
+P_FAULT_CLEAR|清除故障|Clear Fault
+P_FAULT_SUMMARY|汇总|Summary
+P_FAULT_COUNT|数量|Count
+
+# ─────────────── 系统设置 ───────────────
+P_SET_TITLE|系统设置|System Setup
+P_SET_LANG|语言|Language
+P_SET_TIME|时间|Date & Time
+P_SET_SNTP|网络校时|Network Time
+P_SET_SAVE|保存设置|Save Settings
+P_SET_SAVED|设置已保存|Settings Saved
+P_SET_FACTORY|恢复出厂|Factory Reset
+P_SET_FACTORY_WARN|将清除全部设置|Clears All Settings
+P_SET_FACTORY_DONE|已恢复出厂设置|Factory Settings Restored
+P_SET_SAVED_NVS|配置已写入存储|Settings Written to Storage
+
+# ─────────────── 状态 ───────────────
+P_STA_TITLE|状态信息|Status
+P_STA_WIFI|无线网络|WiFi
+P_STA_IP|地址|IP
+P_STA_RSSI|信号|Signal
+P_STA_UPTIME|运行时间|Uptime
+P_STA_HEAP|剩余内存|Free Heap
+P_STA_FLASH|固件占用|Firmware Used
+P_STA_TIME|当前时间|Current Time
+P_STA_LINKED|已连接|Connected
+P_STA_LINKING|连接中|Connecting
+P_STA_NONET|未连接|Not Connected
+
+# ─────────────── 关于 ───────────────
+P_ABOUT_TITLE|关于|About
+P_ABOUT_MODEL|型号|Model
+P_ABOUT_NAME|产品名|Product
+P_ABOUT_BUILD|构建|Build
+P_ABOUT_FLASH|固件|Firmware
+P_ABOUT_SCREEN|屏幕|Screen
+P_ABOUT_BUTTONS|按键|Buttons
+P_ABOUT_HW|硬件|Hardware
+
+# ─────────────── UI v3 新增（2026-10-02 重设计）───────────────
+M_HOME|主菜单|Main Menu
+M_PINS|引脚档案|Pin Map
+M_WIZ|设置向导|Setup Wizard
+P_PINS_TITLE|引脚档案|Pin Map
+P_PINS_PROFILE|当前档案|Active Profile
+P_PINS_SIG|信号|Signal
+P_PINS_GPIO|GPIO|GPIO
+P_PINS_UNMAPPED|未映射|Unmapped
+P_PROG_ISP_PID|芯片 ID|Chip PID
+P_PROG_ISP_VER|版本|Version
+S_CONFIRM_HINT|长按上键确认|Hold Up to Confirm
+S_STEP|步骤|Step
+S_DONE|完成|Done
+S_ACTIVE|当前|Active
+S_HINT_NAV|长按上键进入 长按下键返回|Hold Up Enter Hold Down Back
+S_HINT_ACT|长按上键执行|Hold Up to Run
+S_HINT_EDIT|长按上键切换|Hold Up to Change

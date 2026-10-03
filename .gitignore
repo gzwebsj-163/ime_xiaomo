@@ -46,3 +46,18 @@ linux/tinyemu-2019-12-21/
 *.img
 *.elf
 *.kbc.bak
+
+# ===== ESP32 固件工程（2026-10-03 从 ~/cow 统一归入本仓库）=====
+# 只入库源码；build 产物与固件二进制不入库（4.4G → 源码级）
+firmware/**/build/
+firmware/**/build_*/
+# 注意：上面的 build_*/ 会误伤源码 build_zh_rnn.py，已用下面的例外排除
+!firmware/**/build_*.py
+!firmware/**/build_*.sh
+firmware/**/managed_components/
+firmware/**/dependencies.lock
+firmware/**/sdkconfig
+firmware/**/logs/
+firmware/**/capture/
+firmware/**/backup/
+firmware/**/tmp/
