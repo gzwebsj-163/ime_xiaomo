@@ -61,3 +61,10 @@ firmware/**/logs/
 firmware/**/capture/
 firmware/**/backup/
 firmware/**/tmp/
+
+# ===== 本地凭据（绝不上传）=====
+# wifi_cfg.h 含明文 WiFi SSID/密码。历史上因工程不在 git 内而无泄露风险，
+# 2026-10-03 工程并入本仓库后该前提失效，已从索引移除并加入此规则。
+firmware/**/wifi_cfg.h
+firmware/**/*secret*
+firmware/**/*credential*
