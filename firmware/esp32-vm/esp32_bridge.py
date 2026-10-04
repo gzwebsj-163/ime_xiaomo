@@ -20,6 +20,9 @@ import os
 import glob
 import sys
 # 确保 /app 在 sys.path, 以便 import crypto.obf_engine.*
+# ⚠️ 事实核查(2026-10-04, 服务器实测): `crypto/obf_engine` 实际在容器 `mocode-cli:/app/`,
+#   而 `channel/web`(本文件假设的所在地)在容器 `mocode:/app/app/`. 二者【不是同一个容器】,
+#   故这行 sys.path 想同时覆盖两个前缀在单容器内【不可能成立】.
 for _p in ("/app", "/app/app/channel/web"):
     if _p not in sys.path:
         sys.path.insert(0, _p)

@@ -21,12 +21,27 @@ logger = logging.getLogger(__name__)
 #   容器内: 本文件与 esp32_bridge.py 同处 channel/web/, 容器根在 sys.path
 #   本工程: 本文件与 esp32_bridge.py 同处 firmware/esp32-vm/
 # 先试容器路径(生产语义), 失败才回退同目录(自测)。
-# ⚠️ 事实核查(2026-10-04): 本仓库内【没有】channel/ 目录、也没有任何 web.py,
-#   所以上面那行容器 import 在本仓库永远走不通 —— 它只可能在仓库外的部署
-#   环境成立(那份代码我没见过, 属未验证假设, 不是已核实事实)。
-#   据此: "esp32_bridge 与本文件必须一起进容器"是本文件唯一的部署约束。
-# ⚠️ 本文件在全仓库【零引用】(没有任何 web.py / 挂载点会 load 它), 是孤儿文件。
-#   本轮为它补的自检不代表它已在生产跑通, 只代表代码本身可导入且行为可验证。
+#
+# ✅ 事实核查(2026-10-04, 只读登录 8.163.46.174 实测, 非推断):
+#   1) 容器 `mocode` (mocode-web:latest, 9899) 内 `/app/app/channel/web/` 【真实存在】,
+#      含 web_channel.py(493KB)/chat.html/static/dialog_monitor.js 等 —— 布局假设成立。
+#      但 channel/ 与 channel/web/ 均【无 __init__.py】, 故容器 import 走 PEP-420 命名空间包,
+#      依赖容器根在 sys.path。
+#   2) `esp32_bridge.py` 与 `esp32_handlers.py` 在【任何容器内都搜不到】(全盘 find) ——
+#      本仓库这两个文件【从未部署】。
+#   3) web_channel.py 里【零】esp32 路由 / 零 Handler 引用(8 处 "esp32" 全是无关的
+#      数据处理文案) —— 这两个 Handler 【没有被挂载】。
+#   4) esp32_bridge.py 里 `sys.path.insert(0,"/app")` 想 import 的 `crypto.obf_engine`
+#      实际位于【另一个容器】`mocode-cli:/app/crypto/obf_engine`, 不在 `mocode` —— 跨容器错配。
+# ==> 真正跑在生产路径上的实现是【另一份】: `mocode-cli:/app/esp32_vm_gateway.py`
+#     (154 行, ThreadingHTTPServer, 端口 9897, 同一套信封协议, PSK 全零,
+#      import cli.mcp.vm_tools + chacha20_poly1305)。接口与本文件不同:
+#      prod `handle_vm(action,payload)` / `seal(obj,dev,path)`  vs
+#      本文件 `handle_vm(plain)` / `seal(obj,path,dev)`(注意 dev/path 次序相反)。
+#     ⚠️ 且该网关当前【没有运行】(全机无 9897 监听、无进程、端口未映射)。
+# ==> 结论: 本文件是同一协议的一份【孤儿替代实现】; 它假设的部署路径(塞进 9899 web 容器的
+#     channel/web)【并非生产做法】。本文件在全仓库零引用, 为其补的自检只证明
+#     "代码可导入且行为可验证", 不证明它已在生产跑通。
 try:
     from channel.web import esp32_bridge
 except ImportError:  # pragma: no cover - 仅本工程自测走到
