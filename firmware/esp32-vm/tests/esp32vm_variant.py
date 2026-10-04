@@ -74,6 +74,13 @@ def main():
     # 基线: 未变异必须全绿, 否则后面每个"变红"都没意义
     rc, out = run_selftest(VM)
     if rc != 0 or 'ALL PASS' not in out:
+        # ⚠️ 无论如何都先打一行汇总(2026-10-04 自查): 否则上层 run_tests.sh 的
+        #   sed 取不到数字, 标签会显示成 "杀掉 ?/?, 存活 ?" —— 而调用方
+        #   分不清"没跑"和"跑了没抓到", 这就是 M10 说的误导性失败原因。
+        # ⚠️ 措辞必须与成功路径【逐字同形】(含 ", N survived"),
+        #   否则 sed 的模式匹配不上, 问号照样漏出来 —— 修了一次才发现。
+        print('esp32vm variant: 0/%d killed, 0 survived, 0 invalid (基线未绿, 未施加变异)'
+              % len(MUTANTS))
         print('BASELINE NOT GREEN (rc=%d) — 变异验证无意义, 先修自检本身' % rc)
         print(out[-2000:])
         return 2
