@@ -15,9 +15,22 @@ Web 容器内 esp32_bridge.py 提供完整能力:
 import json
 import logging
 
-from channel.web import esp32_bridge
-
 logger = logging.getLogger(__name__)
+
+# 两种上下文都要能导入(2026-10-04):
+#   容器内: 本文件与 esp32_bridge.py 同处 channel/web/, 容器根在 sys.path
+#   本工程: 本文件与 esp32_bridge.py 同处 firmware/esp32-vm/
+# 先试容器路径(生产语义), 失败才回退同目录(自测)。
+# ⚠️ 事实核查(2026-10-04): 本仓库内【没有】channel/ 目录、也没有任何 web.py,
+#   所以上面那行容器 import 在本仓库永远走不通 —— 它只可能在仓库外的部署
+#   环境成立(那份代码我没见过, 属未验证假设, 不是已核实事实)。
+#   据此: "esp32_bridge 与本文件必须一起进容器"是本文件唯一的部署约束。
+# ⚠️ 本文件在全仓库【零引用】(没有任何 web.py / 挂载点会 load 它), 是孤儿文件。
+#   本轮为它补的自检不代表它已在生产跑通, 只代表代码本身可导入且行为可验证。
+try:
+    from channel.web import esp32_bridge
+except ImportError:  # pragma: no cover - 仅本工程自测走到
+    import esp32_bridge  # type: ignore
 
 # 端点路径（用于信封 path 校验 + 响应信封）
 VM_PATH = "/api/esp32/vm"

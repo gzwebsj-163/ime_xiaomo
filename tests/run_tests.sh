@@ -740,6 +740,38 @@ else
     FAIL=$((FAIL+1)); FAILED_NAMES+=("crw matrix")
 fi
 
+# ---- esp32-vm 信封层 / 指令分发 / web Handler (2026-10-04 新增) ----
+# 为什么进网: esp32_bridge.selftest() 只覆盖最底层 AEAD(RFC 8439 官方向量),
+#   而真正跑生产流量的是它上面三层 open_envelope / handle_vm / esp32_handlers ——
+#   这三层此前【零验证】, 且 esp32-vm 在整个回归矩阵里出现 0 次。
+# 变异矩阵在 firmware/esp32-vm/tests/esp32vm_variant.py: 拿掉重放窗口/path
+#   绑定/tag 校验/AAD 绑定/ts 改写 任一, 5 条变异必须全被杀。
+# ⚠️ 变异这步要真跑, 所以它自己内部会再跑一次 selftest(共约 6 次 python 起停)。
+#   数字一律从脚本输出里取, 不写死(同 CRW 那处的教训: 写死的标签会撒谎)。
+esp32vm_st=$(python3 firmware/esp32-vm/selftest_handlers.py 2>&1); esp32vm_st_rc=$?
+esp32vm_ck=$(printf '%s' "$esp32vm_st" | sed -n 's/.*ALL PASS (\([0-9]*\) checks.*/\1/p' | head -1)
+if [ $esp32vm_st_rc -eq 0 ] && printf '%s' "$esp32vm_st" | grep -q "ALL PASS"; then
+    green "  [PASS] esp32-vm handlers selftest (${esp32vm_ck:-?} checks: 信封往返/重放窗口/path绑定/AAD绑定/指令分发/web handler)"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] esp32-vm handlers selftest (rc=$esp32vm_st_rc)"
+    echo "$esp32vm_st" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("esp32-vm selftest")
+fi
+
+esp32vm_var=$(python3 firmware/esp32-vm/tests/esp32vm_variant.py 2>&1); esp32vm_var_rc=$?
+esp32vm_vk=$(printf '%s' "$esp32vm_var" | sed -n 's/^esp32vm variant: \([0-9]*\)\/.*/\1/p' | head -1)
+esp32vm_vt=$(printf '%s' "$esp32vm_var" | sed -n 's/^esp32vm variant: [0-9]*\/\([0-9]*\) killed.*/\1/p' | head -1)
+esp32vm_vs=$(printf '%s' "$esp32vm_var" | sed -n 's/^esp32vm variant: [0-9]*\/[0-9]* killed, \([0-9]*\) survived.*/\1/p' | head -1)
+if [ $esp32vm_var_rc -eq 0 ]; then
+    green "  [PASS] esp32vm variant (变异 ${esp32vm_vk:-?}/${esp32vm_vt:-?} 全杀, 存活 ${esp32vm_vs:-0})"
+    PASS=$((PASS+1))
+else
+    red "  [FAIL] esp32vm variant (rc=$esp32vm_var_rc 杀掉 ${esp32vm_vk:-?}/${esp32vm_vt:-?}, 存活 ${esp32vm_vs:-?}) —— 判据本身失效, 上面所有绿灯都不作数"
+    echo "$esp32vm_var" | sed 's/^/    /'
+    FAIL=$((FAIL+1)); FAILED_NAMES+=("esp32vm variant")
+fi
+
 # 能力卡: 命令表 / 状态表 / 黄金 / 帧布局 / CRC 标准向量 / HELLO 打包往返
 dmcc_out=$("$BIN" dmc cmds 2>&1); dmcs_out=$("$BIN" dmc states 2>&1)
 dmcg_out=$("$BIN" dmc golden 2>&1); dmcf_out=$("$BIN" dmc frame 2>&1)
