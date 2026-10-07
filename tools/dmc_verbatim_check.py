@@ -56,7 +56,10 @@ def read(path):
 
 
 def extract(text, sentinel):
-    """反解一个区段的原文文本, 返回 (text, ok)。按位置剥掉归档体加的 3 行。"""
+    """反解一个区段的原文文本, 返回 (text, ok, why)。按位置剥掉归档体加的 3 行。
+
+    🕳️ 第三返回值 why 是【成因分类】: 失败时必须说清是哨兵找不到, 还是区段太短,
+    还是包装行结构被改 —— 三者排查方向完全不同, 混报一句等于没报 (锚点 K/M10)。"""
     begin = "/* >>> BEGIN VERBATIM src/hw/%s " % sentinel
     end   = "/* <<< END VERBATIM src/hw/%s <<< */" % sentinel
 
@@ -69,18 +72,22 @@ def extract(text, sentinel):
         elif line.startswith(end):
             j = idx
             break
-    if i is None or j is None:
-        return None, False
+    if i is None:
+        return None, False, "BEGIN 哨兵行缺失(区段头被删或改名)"
+    if j is None:
+        return None, False, "END 哨兵行缺失(区段未闭合)"
 
     body = lines[i + 1:j]
     if len(body) < 3:
-        return None, False
+        return None, False, "区段仅 %d 行, 不足包装行 3 行(疑似被清空)" % len(body)
 
     # 位置剥离: 头部 2 行(说明注释 + #if defined), 尾部 1 行(#endif)
     if not (body[1].startswith("#if defined(")
             and body[-1].startswith("#endif")
             and body[0].lstrip().startswith("/*")):
-        return None, False
+        return None, False, ("包装行结构不符: 期望 头1=/*注释 头2=#if defined( 尾1=#endif, "
+                             "实际 头1=%r 头2=%r 尾1=%r"
+                             % (body[0].strip()[:28], body[1].strip()[:28], body[-1].strip()[:28]))
     body = body[2:-1]
 
     # 再剔除 BALANCE-PAD 子区段(归档体为配平预处理嵌套而追加的 #endif, 非原文)。
@@ -98,9 +105,9 @@ def extract(text, sentinel):
             continue
         out.append(line)
     if in_pad:
-        return None, False
+        return None, False, "BALANCE-PAD 子区段未闭合"
 
-    return "".join(out), True
+    return "".join(out), True, ""
 
 
 def main():
@@ -120,9 +127,11 @@ def main():
             rc = 2
             continue
 
-        got, ok = extract(text, sentinel)
+        got, ok, why = extract(text, sentinel)
         if not ok:
-            print("FAIL  %-32s 哨兵行缺失或包装行结构不符" % sentinel)
+            # 🕳️ 失败消息必须带【成因分类】(锚点 K 的 M10 教训): 原来一律报
+            # "哨兵行缺失或包装行结构不符", 两种成因完全不同, 只报一句等于没报。
+            print("FAIL  %-32s 抽取失败: %s" % (sentinel, why))
             rc = 1
             continue
 

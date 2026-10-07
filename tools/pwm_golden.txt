@@ -1,0 +1,9 @@
+# 自动生成于 2026-10-04 16:00 —— bash tools/pwm_matrix.sh --update-golden
+# 语义: 见 tools/pwm_matrix.sh 第 5 项说明
+host  a8a7a18ae7804bab34160a7fbee66127
+mode0 a8a7a18ae7804bab34160a7fbee66127
+mode1 f315c3c2abd1a157fa34345938ff358b
+mode2 c1e2c5b1586c7535ab7e6a8eaa513f97
+mode3 4423d1a8522a8f3e8abd68dccddb49b8
+mode4 1789ae894ade7c9183634132ff974d2c
+mode5 45f89b1213eca77a41da5d02bf517e12
