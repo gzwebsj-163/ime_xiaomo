@@ -22,13 +22,23 @@ jobs:
 
       - name: Build for iPhone Simulator
         run: |
+          set -o pipefail
           xcodebuild -project ios/Xiaomo.xcodeproj \
             -scheme Xiaomo \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build 2>&1 | tee ios-build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xiaomo-iOS-build-log
+          path: ios-build.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Package simulator app
         run: |
@@ -40,6 +50,7 @@ jobs:
           rm -rf cloud-build/Payload
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: Xiaomo-iOS-Simulator
           path: |
