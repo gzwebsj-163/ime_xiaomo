@@ -1,0 +1,49 @@
+name: Build iOS app
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ios-simulator:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build for iPhone Simulator
+        run: |
+          xcodebuild -project ios/Xiaomo.xcodeproj \
+            -scheme Xiaomo \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package simulator app
+        run: |
+          mkdir -p cloud-build/Payload
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -path '*Build/Products/Debug-iphonesimulator/Xiaomo.app' -print -quit)
+          test -n "$APP"
+          cp -R "$APP" cloud-build/Payload/
+          ditto -c -k --sequesterRsrc --keepParent cloud-build/Payload Xiaomo-iOS-Simulator.zip
+          rm -rf cloud-build/Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xiaomo-iOS-Simulator
+          path: |
+            Xiaomo-iOS-Simulator.zip
+            ios/Xiaomo.xcodeproj
+          if-no-files-found: error
+          retention-days: 14

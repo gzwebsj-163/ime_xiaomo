@@ -1,0 +1,43 @@
+# XcodeGen 工程描述：xcodegen generate 后直接用 Xcode 打开 ios/Xiaomo.xcodeproj
+name: Xiaomo
+options:
+  bundleIdPrefix: dev.xiaomo
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  Xiaomo:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: ../src/lexer.c
+      - path: ../src/parser.c
+      - path: ../src/ast.c
+      - path: ../src/vm.c
+      - path: ../src/tensor.c
+      - path: ../src/nd_tensor.c
+      - path: ../src/weights.c
+      - path: xiaomo_embed.c
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: xiaomo
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.xiaomo.app
+        SWIFT_OBJC_BRIDGING_HEADER: App/Xiaomo-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../include"
+          - "$(SRCROOT)"
+        # 核心源码是 .c，但用了 vm.c 里的 C++ 语法，按 C++ 编译（与顶层 Makefile 一致）
+        OTHER_CFLAGS: ["$(inherited)", "-x", "c++"]
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - framework: Accelerate.framework
+        embed: false
