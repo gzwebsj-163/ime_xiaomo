@@ -57,7 +57,9 @@ struct ContentView: View {
     private var agentView: some View {
         NavigationView {
             VStack(alignment: .leading, spacing: 12) {
-                LabeledContent("Coordinator") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Coordinator")
+                        .font(.subheadline)
                     TextField("IP:端口", text: $agent.coordinator)
                         .textInputAutocapitalization(.never)
                         .disableAutocorrection(true)
